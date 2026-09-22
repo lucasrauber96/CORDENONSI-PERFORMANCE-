@@ -107,15 +107,15 @@ svg{display:block;}
 .tagline{text-align:right; font-size:12.5px; font-style:italic; color:var(--brand); font-weight:600; max-width:260px; border-right:3px solid var(--brand-light); padding-right:12px; line-height:1.4;}
 
 /* ============ GRID / CARD ============ */
-.grid{display:grid; gap:16px;}
-.g6{grid-template-columns:repeat(6,1fr);}
-.g4{grid-template-columns:repeat(4,1fr);}
-.g3{grid-template-columns:repeat(3,1fr);}
-.g2{grid-template-columns:repeat(2,1fr);}
+.grid{display:grid; gap:16px; min-width:0;}
+.g6{grid-template-columns:repeat(6,minmax(0,1fr));}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr));}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr));}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr));}
 @media(max-width:1400px){.g6{grid-template-columns:repeat(3,1fr);}} @media(max-width:1200px){.g4{grid-template-columns:repeat(2,1fr);}}
 @media(max-width:760px){.g6,.g4,.g3,.g2{grid-template-columns:repeat(2,1fr);}}
 
-.card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:20px;}
+.card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:20px; min-width:0;}
 .card h3{font-size:15px; font-weight:700; margin:0 0 4px;}
 .card .card-sub{font-size:11.5px; color:var(--muted-2); margin-bottom:14px;}
 
@@ -200,6 +200,11 @@ tbody tr:hover{background:var(--brand-bg);}
 .detail-head h2{margin:0; font-size:20px; font-weight:800;}
 .detail-head p{margin:2px 0 0; font-size:12.5px; color:var(--muted);}
 
+/* ============ modal centralizado (detalhe de falha, etc.) ============ */
+.modal-overlay{position:fixed; inset:0; background:rgba(10,27,77,.45); display:flex; align-items:center; justify-content:center; z-index:70; padding:20px;}
+.modal-box{width:min(520px,94vw); max-height:84vh; overflow-y:auto; background:var(--card); border-radius:var(--radius); padding:24px; box-shadow:0 10px 40px rgba(10,27,77,.25);}
+.modal-box .close{float:right; cursor:pointer; color:var(--muted); font-size:22px; line-height:1;}
+
 /* ============ gauges ============ */
 .gauge-row{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; text-align:center; align-items:start;}
 .gauge-item{display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-width:0;}
@@ -223,8 +228,9 @@ tbody tr:hover{background:var(--brand-bg);}
 .dropzone p{margin:0; font-size:12.5px; color:var(--muted);}
 
 /* ============ podium ============ */
-.podium{display:flex; align-items:flex-end; justify-content:center; gap:18px; padding:20px 0 4px;}
-.podium .p-item{text-align:center; width:150px;}
+.podium{display:flex; align-items:flex-end; justify-content:center; gap:10px; padding:20px 0 4px;}
+.podium .p-item{text-align:center; width:auto; flex:1 1 0; min-width:0; max-width:150px;}
+.podium .name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .podium .p-item .av{width:56px; height:56px; border-radius:50%; margin:0 auto 8px; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:18px;}
 .podium .p1 .av{background:linear-gradient(135deg,#F6C445,#E8A317); width:68px; height:68px; font-size:21px;}
 .podium .p2 .av{background:linear-gradient(135deg,#C9D2DE,#9AA7B8);}
@@ -452,6 +458,8 @@ function fmtInt(n){ if(n===null||n===undefined) return '—'; return Math.round(
 function fmtPct(n,d=1){ if(n===null||n===undefined) return '—'; return n.toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function fmtNum(n,d=2){ if(n===null||n===undefined) return '—'; return n.toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function fmtMoney(n){ if(n===null||n===undefined) return '—'; return 'R$ '+Math.round(n).toLocaleString('pt-BR'); }
+const MESES_ABREV = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+function mesLabelCurto(chaveMes){ const m=(chaveMes||'').match(/^(\d{4})-(\d{2})$/); if(!m) return chaveMes; return `${MESES_ABREV[parseInt(m[2],10)-1]}/${m[1].slice(2)}`; }
 function sevLabel(s){ return {critico:'Crítico',atencao:'Atenção',bom:'Bom',excelente:'Excelente'}[s]||s; }
 function sevColor(s){ return {critico:'var(--red)',atencao:'var(--yellow)',bom:'var(--brand)',excelente:'var(--green)'}[s]||'var(--muted)'; }
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
@@ -527,10 +535,13 @@ function gaugeArc(value, max, color, size=110){
   const pt=(a)=>[cx+r*Math.cos(a*Math.PI/180), cy+r*Math.sin(a*Math.PI/180)];
   const [x1,y1]=pt(180), [x2,y2]=pt(360);
   const [mx,my]=pt(endA);
-  const large = pct>0.5?1:0;
+  // O arco preenchido nunca passa de 180° (pct vai de 0 a 1 sobre meia volta),
+  // então o large-arc-flag é sempre 0 — usar pct>0.5 aqui desenhava o arco
+  // "pelo lado de fora" (a volta reflexa) sempre que o valor passava de 50%,
+  // cortando a maior parte do preenchimento para fora do viewBox.
   return `<svg viewBox="0 0 ${size} ${size/1.7}" width="${size}" height="${size/1.7}">
     <path d="M ${x1} ${y1} A ${r} ${r} 0 1 1 ${x2} ${y2}" fill="none" stroke="var(--line)" stroke-width="11" stroke-linecap="round"/>
-    <path d="M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${mx} ${my}" fill="none" stroke="${color}" stroke-width="11" stroke-linecap="round"/>
+    <path d="M ${x1} ${y1} A ${r} ${r} 0 0 1 ${mx} ${my}" fill="none" stroke="${color}" stroke-width="11" stroke-linecap="round"/>
   </svg>`;
 }
 
@@ -621,6 +632,7 @@ function trocarPeriodo(valor){
   DATA = (valor==='atual') ? DATA_ATUAL : HISTORICO_MESES[valor];
   MOTORISTAS = recomputarMotoristas(DATA);
   opFiltro = null;
+  aplicarPesoMedioNaFrotaAtual();
   render();
 }
 function recomputarMotoristas(dataset){
@@ -1171,7 +1183,7 @@ function openVeiculoDetail(placa){
         <div class="icon">${ICONS.veiculos}</div>
         <div><h2>${v.placa}</h2><p>${v.motorista?v.motorista+' · ':''}${v.operacao} · ${fmtInt(v.distancia_km)} km na semana</p></div>
       </div>
-      <div class="tabs" id="vTabs">${['Visão Geral','Telemetria','Manutenção','Abastecimento','Histórico','Documentos'].map((t,i)=>`<div class="tab ${i===0?'active':''}" data-tab="${t}">${t}</div>`).join('')}</div>
+      <div class="tabs" id="vTabs">${['Visão Geral','Telemetria','Manutenção','Abastecimento','Veículo'].map((t,i)=>`<div class="tab ${i===0?'active':''}" data-tab="${t}">${t}</div>`).join('')}</div>
       <div id="vTabContent">
         <div class="grid g3" style="margin-bottom:16px;">
           ${kpiCard('target','Nota de condução', nota!==null?nota:'—')}
@@ -1240,23 +1252,59 @@ function openVeiculoDetail(placa){
         </div>
         <div class="card"><h3>Abastecimentos no período importado</h3>
         <div class="card-sub">${txs.length} abastecimento(s) encontrados para ${v.placa}</div>
-        <table><thead><tr><th>Data</th><th class="num">KM rodado</th><th class="num">Litros</th></tr></thead>
-        <tbody>${txs.slice(0,30).map(t=>`<tr><td>${t.data||'—'}</td><td class="num">${fmtInt(t.km_total)}</td><td class="num">${fmtNum(t.litros,1)}</td></tr>`).join('')}</tbody></table>
+        <div class="table-scroll"><table><thead><tr><th>Data</th><th class="num">KM rodado</th><th class="num">Litros</th></tr></thead>
+        <tbody>${txs.slice(0,30).map(t=>`<tr><td style="white-space:nowrap;">${t.data||'—'}</td><td class="num">${fmtInt(t.km_total)}</td><td class="num">${fmtNum(t.litros,1)}</td></tr>`).join('')}</tbody></table></div>
         </div>` : emptyState('combustivel','Sem abastecimento importado para esta placa','Importe o relatório de Abastecimento em Importações para ver o histórico de reabastecimentos desta placa.','Ir para Importações');
     } else if(t.dataset.tab==='Manutenção'){
       const falhas = (FALHAS_POR_PLACA[v.placa]||[]).slice().sort((a,b)=> a.data<b.data?1:-1);
+      FALHAS_ATUAIS = falhas;
       overlay.querySelector('#vTabContent').innerHTML = falhas.length ? `
         <div class="card"><h3>Falhas registradas no período importado</h3>
-        <div class="card-sub">${falhas.length} ocorrência(s) para ${v.placa}</div>
-        <table><thead><tr><th>Data</th><th>Descrição</th><th>Status</th></tr></thead>
-        <tbody>${falhas.map(f=>`<tr><td class="muted" style="white-space:nowrap;">${f.data||'—'}</td><td>${f.descricao}${f.ocorrencias?` <span class="muted">(${f.ocorrencias}x)</span>`:''}</td><td>${f.status?`<span class="pill ${/ativ/i.test(f.status)?'critico':'bom'}">${f.status}</span>`:'—'}</td></tr>`).join('')}</tbody></table>
+        <div class="card-sub">${falhas.length} ocorrência(s) para ${v.placa} · clique numa linha para ver a descrição completa com data e hora</div>
+        <div class="table-scroll"><table><thead><tr><th>Data</th><th>Descrição</th><th>Status</th></tr></thead>
+        <tbody>${falhas.map((f,i)=>`<tr onclick="abrirFalhaModal(${i})"><td class="muted" style="white-space:nowrap;">${f.data||'—'}</td><td style="max-width:1px; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.descricao}${f.ocorrencias?` <span class="muted">(${f.ocorrencias}x)</span>`:''}</td><td>${f.status?`<span class="pill ${/ativ/i.test(f.status)?'critico':'bom'}">${f.status}</span>`:'—'}</td></tr>`).join('')}</tbody></table></div>
         </div>` : emptyState('veiculos','Sem falhas registradas para esta placa','Suba o "Histórico de diagnóstico de falhas de veículos" em Importações para ver a quantidade e a descrição das falhas mecânicas/eletrônicas desta placa.','Ir para Importações');
-    } else if(t.dataset.tab!=='Visão Geral'){
-      overlay.querySelector('#vTabContent').innerHTML = emptyState('veiculos', `${t.dataset.tab} ainda não disponível`, 'Essa aba depende de um cadastro/importação que ainda não recebemos para este veículo.');
+    } else if(t.dataset.tab==='Veículo'){
+      const cad = CADASTRO_VEICULOS[v.placa];
+      const linha = (lbl,val) => `<div class="kpi" style="padding:12px 14px;"><div class="body"><div class="lbl">${lbl}</div><div class="num" style="font-size:15px;">${val||'—'}</div></div></div>`;
+      overlay.querySelector('#vTabContent').innerHTML = `
+        <div class="card"><h3>Dados do veículo</h3>
+        <div class="card-sub">${cad ? 'do Cadastro de Veículos importado' : 'cadastro de veículos ainda não importado nesta sessão — mostrando o que já vem da telemetria'}</div>
+        <div class="grid g2">
+          ${linha('Placa', v.placa)}
+          ${linha('Marca', v.marca)}
+          ${linha('Modelo', v.modelo)}
+          ${linha('Ano', v.ano)}
+          ${linha('Segmento', v.segmento)}
+          ${linha('Propriedade', cad?cad.propriedade:null)}
+          ${linha('Operação', v.operacao)}
+          ${linha('Motorista', v.motorista)}
+        </div>
+        </div>
+        ${!cad?emptyState('veiculos','Cadastro de veículos não importado','Importe o "Cadastro de veículos" em Importações para completar marca, modelo, ano e propriedade de todas as placas.','Ir para Importações'):''}`;
     } else {
       openVeiculoDetail(placa); overlay.remove();
     }
   }));
+  document.body.appendChild(overlay);
+}
+function abrirFalhaModal(i){
+  const f = FALHAS_ATUAIS[i];
+  if(!f) return;
+  const overlay = el(`<div class="modal-overlay"></div>`);
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <span class="close">&times;</span>
+      <h3 style="margin:0 0 4px;">Detalhe da falha</h3>
+      <div class="muted" style="margin-bottom:14px;">${f.data||'Data não informada'}</div>
+      <p style="font-size:13.5px; line-height:1.6;">${f.descricao}</p>
+      <div class="grid g2" style="margin-top:14px;">
+        ${f.status?`<div class="kpi" style="padding:12px 14px;"><div class="body"><div class="lbl">Status</div><div class="num" style="font-size:15px;">${f.status}</div></div></div>`:''}
+        ${f.ocorrencias?`<div class="kpi" style="padding:12px 14px;"><div class="body"><div class="lbl">Ocorrências</div><div class="num" style="font-size:15px;">${f.ocorrencias}</div></div></div>`:''}
+      </div>
+    </div>`;
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  overlay.querySelector('.close').addEventListener('click', ()=>overlay.remove());
   document.body.appendChild(overlay);
 }
 
@@ -1402,13 +1450,16 @@ function viewCombustivel(){
     </div>` : ''}
     <div class="card" style="margin-bottom:20px;">
       <h3>Consumo em Litros x Kms Rodados</h3>
-      <div class="card-sub">${ABASTECIMENTO ? 'cada ponto é um mês do relatório de abastecimento importado · soma real de KM e Litros das combinações placa×mês elegíveis (auditado, nada estimado)' : 'importe o relatório de abastecimento para ver este cruzamento com números reais — sem ele, não há como auditar litros x km'}</div>
+      <div class="card-sub">${ABASTECIMENTO ? 'mês a mês, a partir de tudo que já foi importado do relatório de Abastecimento nesta sessão (desde janeiro, se os arquivos daqueles meses foram importados) · soma real de KM e Litros das combinações placa×mês elegíveis, nada estimado' : 'importe o relatório de abastecimento para ver este cruzamento com números reais — sem ele, não há como auditar litros x km'}</div>
       ${(() => {
-        if(!ABASTECIMENTO || !ABASTECIMENTO.evolucao.length) return emptyState('combustivel','Sem abastecimento importado','Importe o relatório de Abastecimento em Importações para calcular consumo (L) x km rodados por período, sem estimativas.','Ir para Importações');
-        const pontos = ABASTECIMENTO.evolucao.map(e=>({x:e.km, y:e.litros, r:6, color:'var(--brand)'}));
-        return scatterChart(pontos) + `<div class="muted" style="text-align:center;">eixo X: km rodados no mês (soma real) · eixo Y: litros consumidos no mês (soma real) · ${ABASTECIMENTO.evolucao.length} mês(es) com dado elegível</div>`
+        if(!ABASTECIMENTO || !ABASTECIMENTO.evolucao.length) return emptyState('combustivel','Sem abastecimento importado','Importe o relatório de Abastecimento em Importações para calcular consumo (L) x km rodados por mês, sem estimativas.','Ir para Importações');
+        const meses = ABASTECIMENTO.evolucao.map(e=>mesLabelCurto(e.mes));
+        const seriesKm = ABASTECIMENTO.evolucao.map(e=>e.km);
+        const seriesLitros = ABASTECIMENTO.evolucao.map(e=>e.litros);
+        return groupedBar(meses, seriesKm, seriesLitros, 'Km rodado', 'Litros consumidos')
+          + `<div class="muted" style="text-align:center;">${ABASTECIMENTO.evolucao.length} mês(es) com dado elegível</div>`
           + `<div class="table-scroll" style="margin-top:12px;"><table><thead><tr><th>Mês</th><th class="num">Km rodado</th><th class="num">Litros consumidos</th><th class="num">km/L</th></tr></thead>
-          <tbody>${ABASTECIMENTO.evolucao.map(e=>`<tr><td>${e.mes}</td><td class="num">${fmtInt(e.km)}</td><td class="num">${fmtInt(e.litros)}</td><td class="num"><b>${e.kml!==null?fmtNum(e.kml):'—'}</b></td></tr>`).join('')}</tbody></table></div>`;
+          <tbody>${ABASTECIMENTO.evolucao.map(e=>`<tr><td>${mesLabelCurto(e.mes)}</td><td class="num">${fmtInt(e.km)}</td><td class="num">${fmtInt(e.litros)}</td><td class="num"><b>${e.kml!==null?fmtNum(e.kml):'—'}</b></td></tr>`).join('')}</tbody></table></div>`;
       })()}
     </div>
     <div class="card" style="margin-bottom:20px;">
@@ -1567,7 +1618,7 @@ function renderRankTab(tab, ordenado, top3){
     </div>
     <div class="table-wrap"><div class="table-scroll"><table>
       <thead><tr><th>#</th><th>Placa</th><th>Operação</th><th class="num">Nota</th><th>Status</th></tr></thead>
-      <tbody id="rankBody">${pagina.map((v,i)=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="muted">${(PAGINA.ranking-1)*25+i+1}º</td><td class="placa">${v.placa}</td><td>${v.operacao}</td><td class="num"><b>${v.nota}</b></td><td><span class="pill ${v.severidade}">${sevLabel(v.severidade)}</span></td></tr>`).join('')}</tbody>
+      <tbody id="rankBody">${pagina.map((v,i)=>{ const statusNota = classificarPorNota(v.nota); return `<tr onclick="openVeiculoDetail('${v.placa}')"><td class="muted">${(PAGINA.ranking-1)*25+i+1}º</td><td class="placa">${v.placa}</td><td>${v.operacao}</td><td class="num"><b>${v.nota}</b></td><td><span class="pill ${statusNota==='critico'?'critico':(statusNota==='bom'?'bom':'excelente')}">${statusNota==='critico'?'Crítico':(statusNota==='bom'?'Bom':'Excelente')}</span></td></tr>`; }).join('')}</tbody>
     </table></div>
     <div class="table-foot">Ranking completo · <span class="muted">reinicia mensalmente, somente frota própria (ver seção 19 da especificação)</span></div>
     <div id="rankPagWrap">${paginacaoHtml('ranking', totalPaginas)}</div>
@@ -1856,6 +1907,7 @@ function importHistRows(){
 let ABASTECIMENTO = null; // {evolucao, mediaOficialGeral, log} — independente do DATA da telemetria
 let ABASTECIMENTO_POR_PLACA = {}; // placa -> [{data,litros,km_total}] — alimenta a aba Abastecimento do veículo
 let FALHAS_POR_PLACA = {}; // placa -> [{data,descricao}] — alimenta a aba Manutenção do veículo
+let FALHAS_ATUAIS = []; // lista de falhas renderizada agora na aba Manutenção — referência p/ o modal de detalhe
 
 function detectarTipoArquivo(headerLine){
   const h = normalizarChave(headerLine);
@@ -1930,6 +1982,7 @@ function bindImportacoes(){
       if(tipo==='autotrac'){
         const {novoDATA, log} = processarCsvAutotrac(texto);
         DATA = aplicarExclusoesGlobais(novoDATA); opFiltro=null;
+        aplicarPesoMedioNaFrotaAtual();
         HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Telemetria (Autotrac)', registros:log.elegiveis, status:'Processado', statusClass:'excelente', data:agora, periodoDetectado:novoDATA.periodo||null});
       } else if(tipo==='abastecimento'){
         const res = processarCsvAbastecimento(texto);
@@ -1944,6 +1997,7 @@ function bindImportacoes(){
         const resumo = recalcularRotasEBenchmarkDaSessao();
         ROTAS_PESOS = { total_cargas: resumo.total_cargas, top_rotas: resumo.top_rotas, faixas_peso: resumo.faixas_peso, clientes: resumo.clientes };
         if(resumo.benchSessao.length) BENCHMARK_ROTAS = resumo.benchSessao;
+        aplicarPesoMedioNaFrotaAtual();
         HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Cargas (rota/peso)', registros:registros.length+' cargas', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado:null});
       } else if(tipo==='cadastro_veiculos'){
         const novos = processarCsvCadastroVeiculos(texto);
@@ -2416,6 +2470,7 @@ function processarCsvCadastroVeiculos(texto){
   const cPlaca = acharColuna(idx,'Placa'), cProp = acharColuna(idx,'Propriedade'),
         cModelo = acharColuna(idx,'Modelo'), cMarca = acharColuna(idx,'Marca'),
         cMotorista = acharColuna(idx,'Motorista'), cSeg = acharColuna(idx,'Segmento'),
+        cAno = acharColuna(idx,'Ano','Ano Fabricação','Ano Fabricacao','Ano Modelo','Ano/Modelo'),
         cOp = acharColuna(idx,'Funcionário Responsável','Funcionario Responsavel');
   if(cPlaca===undefined) throw new Error('Coluna "Placa" não encontrada. Cabeçalho: '+header.join(' | '));
   let novos = 0;
@@ -2427,7 +2482,8 @@ function processarCsvCadastroVeiculos(texto){
     CADASTRO_VEICULOS[placa] = {
       propriedade: cProp!==undefined?r[cProp]:'', modelo: cModelo!==undefined?r[cModelo]:'',
       marca: cMarca!==undefined?r[cMarca]:'', motorista: cMotorista!==undefined?(r[cMotorista]||'').trim():'',
-      segmento: cSeg!==undefined?r[cSeg]:'', operacao: cOp!==undefined?canonOperacao(r[cOp]):null,
+      segmento: cSeg!==undefined?r[cSeg]:'', ano: cAno!==undefined?(r[cAno]||'').trim():'',
+      operacao: cOp!==undefined?canonOperacao(r[cOp]):null,
     };
     novos++;
   }
@@ -2439,6 +2495,7 @@ function aplicarCadastroNaFrotaAtual(){
     const c = CADASTRO_VEICULOS[v.placa];
     if(c){
       v.motorista = c.motorista || null; v.modelo = c.modelo || null; v.marca = c.marca || null;
+      v.segmento = c.segmento || v.segmento || null; v.ano = c.ano || null;
       if(c.operacao) v.operacao = c.operacao;
       enriquecidos++;
     }
@@ -2528,6 +2585,27 @@ function recalcularRotasEBenchmarkDaSessao(){
   }).sort((a,b)=>b.amostras-a.amostras);
 
   return { total_cargas: CARGAS_ACUMULADAS.length, top_rotas: topRotas, faixas_peso: faixas, clientes, benchSessao };
+}
+// Preenche v.peso_medio_kg (usado no scatter "Peso x Média por Veículo" de Rotas e
+// Pesos) a partir das cargas acumuladas NESTA sessão. Sem isso, qualquer período
+// importado na sessão (troca de semana/nova importação) ficava sempre com o
+// gráfico vazio — só a semana "atual" embutida no build trazia o campo pronto,
+// pois o import de Cargas nunca era cruzado de volta com DATA.veiculos. Nunca
+// zera um peso_medio_kg já existente quando não há carga da placa nesta sessão.
+function aplicarPesoMedioNaFrotaAtual(){
+  if(!CARGAS_ACUMULADAS.length || !DATA || !DATA.veiculos) return 0;
+  const somaPorPlaca = {};
+  CARGAS_ACUMULADAS.forEach(c=>{
+    if(c.vazio || !c.peso || c.peso<=1 || !c.placa) return;
+    if(!somaPorPlaca[c.placa]) somaPorPlaca[c.placa] = {soma:0,n:0};
+    somaPorPlaca[c.placa].soma += c.peso; somaPorPlaca[c.placa].n++;
+  });
+  let enriquecidos = 0;
+  DATA.veiculos.forEach(v=>{
+    const s = somaPorPlaca[v.placa];
+    if(s && s.n){ v.peso_medio_kg = Math.round(s.soma/s.n); enriquecidos++; }
+  });
+  return enriquecidos;
 }
 
 function toCsv(rows, cols){ return [cols.join(';')].concat(rows.map(r=>cols.map(c=>r[c]??'').join(';'))).join('\n'); }
