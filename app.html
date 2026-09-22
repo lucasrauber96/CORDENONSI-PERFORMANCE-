@@ -633,6 +633,7 @@ function trocarPeriodo(valor){
   MOTORISTAS = recomputarMotoristas(DATA);
   opFiltro = null;
   aplicarPesoMedioNaFrotaAtual();
+  if(PX_MOTORISTAS.length) PX_FROTA = recalcularPxFrota();
   render();
 }
 function recomputarMotoristas(dataset){
@@ -1679,27 +1680,50 @@ function renderBenchTable(){
   bindPaginacao(document.getElementById('benchCount'), renderBenchTable);
 }
 function viewPx(){
-  const px = PX_DATA;
+  if(!PX_MOTORISTAS.length){
+    const px = PX_DATA;
+    return `
+      <div class="page-head"><div><h1>PX x Frota</h1><p>${px.total_motoristas} motoristas PX contratados no período do relatório · ${fmtInt(px.dias_total)} diárias no total</p></div></div>
+      <div class="grid g4" style="margin-bottom:20px;">
+        ${kpiCard('px','Motoristas PX', px.total_motoristas)}
+        ${kpiCard('money','Custo total estimado', fmtMoney(px.custo_total_estimado))}
+        ${kpiCard('money','Diária média', fmtMoney(px.custo_medio_diaria))}
+        ${kpiCard('rotas','Diárias somadas', fmtInt(px.dias_total))}
+      </div>
+      <div class="grid g2" style="align-items:start; margin-bottom:20px;">
+        <div class="card"><h3>Distribuição por UF</h3>${hbarChart(Object.entries(px.por_uf), ()=>'var(--brand)')}</div>
+        <div class="card"><h3>Distribuição por tipo de veículo</h3>${hbarChart(Object.entries(px.por_tipo_veiculo), ()=>'var(--brand-mid)')}</div>
+      </div>
+      ${emptyState('px','Compare PX x Frota própria','Importe o relatório de "Motoristas PX" em Importações — junto com o relatório de Cargas (que agora também lê a coluna do motorista) — para cruzar quem dirigiu qual placa e comparar nota de condução, km/L e custo em diesel com a frota própria da mesma operação.','Ir para Importações')}
+    `;
+  }
+  const r = PX_FROTA || recalcularPxFrota();
+  const distrib = (campo) => { const c={}; PX_MOTORISTAS.forEach(m=>{ const k=m[campo]||'—'; c[k]=(c[k]||0)+1; }); return Object.entries(c).sort((a,b)=>b[1]-a[1]); };
   return `
-    <div class="page-head"><div><h1>PX x Frota</h1><p>${px.total_motoristas} motoristas PX contratados no período do relatório · ${fmtInt(px.dias_total)} diárias no total</p></div></div>
+    <div class="page-head"><div><h1>PX x Frota</h1><p>${PX_MOTORISTAS.length} motoristas PX importados nesta sessão · ${r.vinculados.length} vinculados a uma placa via o relatório de Cargas</p></div></div>
     <div class="grid g4" style="margin-bottom:20px;">
-      ${kpiCard('px','Motoristas PX', px.total_motoristas)}
-      ${kpiCard('money','Custo total estimado', fmtMoney(px.custo_total_estimado))}
-      ${kpiCard('money','Diária média', fmtMoney(px.custo_medio_diaria))}
-      ${kpiCard('rotas','Diárias somadas', fmtInt(px.dias_total))}
+      ${kpiCard('px','Motoristas PX importados', PX_MOTORISTAS.length)}
+      ${kpiCard('veiculos','Vinculados a placa', r.vinculados.length+'/'+PX_MOTORISTAS.length)}
+      ${kpiCard('target','Nota média PX', r.notaMediaPx!==null?Math.round(r.notaMediaPx):'—', '', r.notaMediaFrotaGeral!==null?`vs ${Math.round(r.notaMediaFrotaGeral)} da frota geral`:'')}
+      ${kpiCard('money', (r.custoTotalDelta||0)>0?'Custo extra em diesel':'Economia em diesel', fmtMoney(Math.abs(r.custoTotalDelta||0)), '', r.litrosTotalDelta!==null?`${fmtNum(Math.abs(r.litrosTotalDelta))} L ${r.litrosTotalDelta>0?'a mais':'a menos'} que a frota da mesma operação`:'')}
     </div>
-    <div class="grid g2" style="align-items:start;">
-      <div class="card">
-        <h3>Distribuição por UF</h3>
-        ${hbarChart(Object.entries(px.por_uf), ()=>'var(--brand)')}
-      </div>
-      <div class="card">
-        <h3>Distribuição por tipo de veículo</h3>
-        ${hbarChart(Object.entries(px.por_tipo_veiculo), ()=>'var(--brand-mid)')}
+    <div class="grid g2" style="align-items:start; margin-bottom:20px;">
+      <div class="card"><h3>Distribuição por UF</h3>${hbarChart(distrib('uf'), ()=>'var(--brand)')}</div>
+      <div class="card"><h3>Distribuição por tipo de veículo</h3>${hbarChart(distrib('tipo_veiculo'), ()=>'var(--brand-mid)')}</div>
+    </div>
+    <div class="table-wrap" style="margin-bottom:20px;">
+      <div class="table-tools"><b style="font-size:13px;">PX vinculados a uma placa</b><span class="muted">— nota de condução e consumo real da telemetria, comparados à média da frota própria na mesma operação</span></div>
+      <div class="table-scroll">
+      ${r.vinculados.length ? `<table><thead><tr><th>Motorista</th><th>Operação</th><th>Placa(s)</th><th class="num">Nota PX</th><th class="num">Nota frota (op.)</th><th class="num">km/L PX</th><th class="num">km/L frota (op.)</th><th class="num">Litros vs. frota</th><th class="num">Custo vs. frota</th></tr></thead>
+      <tbody>${r.vinculados.map(m=>`<tr onclick="openVeiculoDetail('${m.placas[0]}')"><td>${m.nome}</td><td>${m.operacao}</td><td class="placa">${m.placas.join(', ')}</td><td class="num"><b>${m.nota}</b></td><td class="num muted">${m.notaFrotaOp??'—'}</td><td class="num">${m.kml!==null?fmtNum(m.kml):'—'}</td><td class="num muted">${m.kmlFrotaOp!==null?fmtNum(m.kmlFrotaOp):'—'}</td><td class="num">${m.deltaLitros!==null?`<span style="color:${m.deltaLitros>0?'var(--red)':'var(--green)'};">${m.deltaLitros>0?'+':''}${fmtInt(m.deltaLitros)} L</span>`:'—'}</td><td class="num">${m.custoDelta!==null?`<span style="color:${m.custoDelta>0?'var(--red)':'var(--green)'};">${m.custoDelta>0?'+':''}${fmtMoney(m.custoDelta)}</span>`:'—'}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="muted" style="padding:20px;">Nenhum motorista PX bateu com um nome do relatório de Cargas — confira se o relatório de Cargas importado traz a coluna de motorista, e se os nomes batem com os da planilha PX.</div>`}
       </div>
     </div>
+    ${r.naoVinculados.length ? `<div class="card"><h3>PX sem placa identificada (${r.naoVinculados.length})</h3><div class="card-sub">nome não encontrado no relatório de Cargas desta sessão — confira grafia/acentos, ou importe o período de Cargas correspondente</div>
+      <div class="table-scroll" style="max-height:240px; overflow-y:auto;"><table><tbody>${r.naoVinculados.map(m=>`<tr><td>${m.nome}</td><td class="muted">${m.uf||'—'}</td><td class="muted">${m.tipo_veiculo||'—'}</td></tr>`).join('')}</tbody></table></div>
+      </div>` : ''}
     <div class="card" style="margin-top:16px;">
-      <p class="muted"><b>Sobre a comparação km/L, nota e eventos/100km (como no layout de referência):</b> o relatório de motoristas PX traz custo (diária × dias), não traz placa nem consumo — não se liga diretamente à telemetria ou ao abastecimento. Para comparar eficiência PX × frota própria (não só custo), preciso de um relatório que ligue motorista PX à placa operada.</p>
+      <p class="muted">Metodologia: para cada PX vinculado a uma placa (por nome, cruzando a planilha de Motoristas PX com o motorista de cada carga em Cargas), a nota de condução e o km/L vêm da telemetria real da(s) placa(s) que ele operou. "Litros vs. frota" é a diferença entre o litros real consumido e o litros que seria esperado rodando os mesmos km na média de km/L da frota própria da mesma operação — positivo é gasto a mais, negativo é economia. "Custo vs. frota" é essa diferença × ${fmtMoney(DIESEL_PRECO_ASSUMIDO)}/L (preço do diesel configurado).</p>
     </div>
   `;
 }
@@ -1873,7 +1897,7 @@ function viewImportacoes(){
       <div class="dropzone" id="dropzone">
         <div class="ico">${ICONS.upload}</div>
         <h3>Arraste e solte os arquivos aqui ou clique para selecionar</h3>
-        <p>Suportado nesta versão: Telemetria (Autotrac), Abastecimento, Cargas, Cadastro de Veículos e Relatório de Falhas — em CSV ou XLSX. ZIP ainda não é extraído automaticamente (tire os arquivos de dentro do zip antes de subir).</p>
+        <p>Suportado nesta versão: Telemetria (Autotrac), Abastecimento, Cargas, Cadastro de Veículos, Relatório de Falhas e Motoristas PX — em CSV ou XLSX. ZIP ainda não é extraído automaticamente (tire os arquivos de dentro do zip antes de subir).</p>
         <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.zip,.pdf" style="display:none;">
       </div>
     </div>
@@ -1908,15 +1932,102 @@ let ABASTECIMENTO = null; // {evolucao, mediaOficialGeral, log} — independente
 let ABASTECIMENTO_POR_PLACA = {}; // placa -> [{data,litros,km_total}] — alimenta a aba Abastecimento do veículo
 let FALHAS_POR_PLACA = {}; // placa -> [{data,descricao}] — alimenta a aba Manutenção do veículo
 let FALHAS_ATUAIS = []; // lista de falhas renderizada agora na aba Manutenção — referência p/ o modal de detalhe
+let PX_MOTORISTAS = []; // [{nome,uf,tipo_veiculo,dias,diaria}] — acumulado de todos os arquivos de Motoristas PX importados na sessão
+let PX_FROTA = null; // resultado de recalcularPxFrota() — recalculado a cada import de PX/Cargas e a cada troca de período
 
 function detectarTipoArquivo(headerLine){
   const h = normalizarChave(headerLine);
   if(h.includes('nome do veiculo') && h.includes('movimento')) return 'autotrac';
   if(h.includes('falha') || h.includes('defeito') || h.includes('violacao') || h.includes('diagnostico') || (h.includes('spn') && h.includes('fmi'))) return 'falhas';
   if(h.includes('litros') && (h.includes('segmento') || h.includes('km total') || h.includes('km anterior'))) return 'abastecimento';
+  if(h.includes('diaria') && (h.includes('motorista') || h.includes('nome')) && !h.includes('litros') && !h.includes('origem')) return 'px';
   if(h.includes('origem') && h.includes('destino') && h.includes('peso')) return 'cargas';
   if(h.includes('placa') && (h.includes('marca') || h.includes('modelo')) && !h.includes('movimento')) return 'cadastro_veiculos';
   return 'desconhecido';
+}
+// Formato assumido do relatório "Motoristas PX" a partir dos agregados que já
+// vêm embutidos (total_motoristas, custo_total_estimado, custo_medio_diaria,
+// por_uf, por_tipo_veiculo, dias_total): uma linha por motorista/diária, com
+// Motorista, UF, Tipo de Veículo, Dias e Valor da Diária. Se o cabeçalho real
+// vier diferente, o erro abaixo mostra as colunas encontradas para ajuste.
+function processarCsvPx(texto){
+  const linhas = texto.replace(/^﻿/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const delim = detectarDelimitador(linhas[0]);
+  const header = linhas[0].split(delim).map(h=>h.replace(/^"|"$/g,''));
+  const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
+  const cNome = acharColuna(idx,'Motorista','Nome','Nome do Motorista');
+  const cUf = acharColuna(idx,'UF','Estado');
+  const cTipo = acharColuna(idx,'Tipo de Veículo','Tipo de Veiculo','Veículo','Veiculo');
+  const cDias = acharColuna(idx,'Dias','Diárias','Diarias','Quantidade de Dias','Qtd Dias');
+  const cDiaria = acharColuna(idx,'Diária','Diaria','Valor da Diária','Valor da Diaria','Valor Diária');
+  const cData = acharColuna(idx,'Data','Data Início','Data Inicio','Período','Periodo');
+  if(cNome===undefined) throw new Error('Coluna "Motorista"/"Nome" não encontrada no relatório de Motoristas PX. Cabeçalho: '+header.join(' | '));
+  const registros=[]; const datasEncontradas=[];
+  for(let i=1;i<linhas.length;i++){
+    const r = linhas[i].split(delim).map(c=>c.replace(/^"|"$/g,''));
+    if(r.length<2) continue;
+    const nome = (r[cNome]||'').trim();
+    if(!nome) continue;
+    const dataStr = cData!==undefined?(r[cData]||'').trim():'';
+    registros.push({
+      nome, uf: cUf!==undefined?(r[cUf]||'').trim():'', tipo_veiculo: cTipo!==undefined?(r[cTipo]||'').trim():'',
+      dias: cDias!==undefined?brFloat(r[cDias]):null, diaria: cDiaria!==undefined?brFloat(r[cDiaria]):null, data: dataStr,
+    });
+    if(dataStr) datasEncontradas.push(dataStr);
+  }
+  if(!registros.length) throw new Error('Nenhum motorista PX válido encontrado no arquivo.');
+  return { registros, periodoDetectado: rangeDeDatas(datasEncontradas) };
+}
+function normalizarNome(s){ return (s||'').trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' '); }
+// Cruza PX_MOTORISTAS (planilha de motoristas PX) com CARGAS_ACUMULADAS (relatório
+// de cargas, que agora também traz o nome do motorista) por nome normalizado, para
+// descobrir qual placa cada PX operou — é o único jeito de ligar PX à telemetria,
+// já que o relatório de PX em si não traz placa/consumo (só custo por diária).
+function recalcularPxFrota(){
+  const placasPorNome = {};
+  CARGAS_ACUMULADAS.forEach(c=>{
+    if(!c.motorista || !c.placa) return;
+    const key = normalizarNome(c.motorista);
+    if(!placasPorNome[key]) placasPorNome[key] = new Set();
+    placasPorNome[key].add(c.placa);
+  });
+  const porOperacaoFrota = {}; // operacao -> {somaKml:[], somaNota:[]} usando toda a frota atual (referência)
+  DATA.veiculos.forEach(v=>{
+    if(!porOperacaoFrota[v.operacao]) porOperacaoFrota[v.operacao] = {kmls:[], notas:[]};
+    if(v.estimativa_kml!==null) porOperacaoFrota[v.operacao].kmls.push(v.estimativa_kml);
+    const nota = calcularNota(v);
+    if(nota!==null) porOperacaoFrota[v.operacao].notas.push(nota);
+  });
+  const mediaDe = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+
+  const motoristas = [];
+  PX_MOTORISTAS.forEach(px=>{
+    const key = normalizarNome(px.nome);
+    const placas = [...(placasPorNome[key]||[])];
+    const veics = placas.map(p=>DATA.veiculos.find(v=>v.placa===p)).filter(Boolean);
+    if(!veics.length){ motoristas.push({...px, placas, vinculado:false}); return; }
+    const totalKm = veics.reduce((a,v)=>a+v.distancia_km,0) || 1;
+    const notaPx = veics.reduce((a,v)=>a+(calcularNota(v)||0)*v.distancia_km,0)/totalKm;
+    const litrosPx = veics.reduce((a,v)=>a+(v.litros_consumidos||0),0);
+    const operacao = veics[0].operacao;
+    const kmlFrotaOp = mediaDe(porOperacaoFrota[operacao]?.kmls||[]);
+    const notaFrotaOp = mediaDe(porOperacaoFrota[operacao]?.notas||[]);
+    const litrosEsperados = kmlFrotaOp ? totalKm/kmlFrotaOp : null;
+    const deltaLitros = litrosEsperados!==null ? litrosPx-litrosEsperados : null; // >0 = gastou mais que a média da frota na mesma operação
+    motoristas.push({
+      ...px, placas, vinculado:true, operacao, km:totalKm, nota:Math.round(notaPx), litros:litrosPx,
+      kml: litrosPx? Math.round((totalKm/litrosPx)*100)/100 : null,
+      kmlFrotaOp, notaFrotaOp: notaFrotaOp!==null?Math.round(notaFrotaOp):null,
+      deltaLitros, custoDelta: deltaLitros!==null ? deltaLitros*DIESEL_PRECO_ASSUMIDO : null,
+    });
+  });
+
+  const vinculados = motoristas.filter(m=>m.vinculado);
+  const notaMediaPx = mediaDe(vinculados.map(m=>m.nota));
+  const notaMediaFrotaGeral = mediaDe(DATA.veiculos.map(v=>calcularNota(v)).filter(n=>n!==null));
+  const custoTotalDelta = vinculados.reduce((a,m)=>a+(m.custoDelta||0),0);
+  const litrosTotalDelta = vinculados.reduce((a,m)=>a+(m.deltaLitros||0),0);
+  return { motoristas, vinculados, naoVinculados: motoristas.filter(m=>!m.vinculado), notaMediaPx, notaMediaFrotaGeral, custoTotalDelta, litrosTotalDelta };
 }
 function processarCsvFalhas(texto){
   const linhas = texto.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim().length);
@@ -1998,12 +2109,18 @@ function bindImportacoes(){
         ROTAS_PESOS = { total_cargas: resumo.total_cargas, top_rotas: resumo.top_rotas, faixas_peso: resumo.faixas_peso, clientes: resumo.clientes };
         if(resumo.benchSessao.length) BENCHMARK_ROTAS = resumo.benchSessao;
         aplicarPesoMedioNaFrotaAtual();
+        PX_FROTA = recalcularPxFrota();
         HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Cargas (rota/peso)', registros:registros.length+' cargas', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado:null});
       } else if(tipo==='cadastro_veiculos'){
         const novos = processarCsvCadastroVeiculos(texto);
         const enriquecidos = aplicarCadastroNaFrotaAtual();
         aplicarExclusoesGlobais(DATA);
         HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Cadastro de veículos', registros:novos+' veículos ('+enriquecidos+' aplicados à frota atual)', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado:null});
+      } else if(tipo==='px'){
+        const {registros, periodoDetectado} = processarCsvPx(texto);
+        PX_MOTORISTAS = PX_MOTORISTAS.concat(registros);
+        PX_FROTA = recalcularPxFrota();
+        HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Motoristas PX', registros:registros.length+' motoristas', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado});
       } else {
         throw new Error('Não reconheci o tipo deste arquivo pelo cabeçalho: "'+primeiraLinha.slice(0,200)+'".');
       }
@@ -2531,7 +2648,8 @@ function processarCsvCargas(texto){
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
   const cVeic = acharColuna(idx,'Veículo'), cTipo = acharColuna(idx,'Tipo de Operação'),
         cOrigem = acharColuna(idx,'Origem'), cDestino = acharColuna(idx,'Destino'),
-        cPeso = acharColuna(idx,'Peso Carga'), cData = acharColuna(idx,'Data da Carga');
+        cPeso = acharColuna(idx,'Peso Carga'), cData = acharColuna(idx,'Data da Carga'),
+        cMotorista = acharColuna(idx,'Motorista','Condutor','Nome do Motorista','Motorista Responsável','Motorista Responsavel');
   if(cOrigem===undefined || cDestino===undefined) throw new Error('Colunas Origem/Destino não encontradas. Cabeçalho: '+header.join(' | '));
   const registros=[];
   for(let i=1;i<linhas.length;i++){
@@ -2543,9 +2661,10 @@ function processarCsvCargas(texto){
     const vazio = tipo.includes('VAZIO');
     const peso = brFloat(cPeso!==undefined?r[cPeso]:null);
     const placa = cVeic!==undefined? extrairPlaca(r[cVeic]||'') : null;
+    const motorista = cMotorista!==undefined? (r[cMotorista]||'').trim() : '';
     const dataCarga = cData!==undefined?r[cData]:'';
     const mMes = (dataCarga.match(/^(\d{2})\/(\d{2})\/(\d{4})/)||[])[2];
-    registros.push({origem,destino,peso,vazio,placa,mes:mMes,tipo});
+    registros.push({origem,destino,peso,vazio,placa,motorista,mes:mMes,tipo});
   }
   CARGAS_ACUMULADAS = CARGAS_ACUMULADAS.concat(registros);
   return registros;
