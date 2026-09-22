@@ -246,8 +246,14 @@ tbody tr:hover{background:var(--brand-bg);}
 .map-card{position:relative; background:linear-gradient(180deg,#EAF2FE,#DCEAFD); border-radius:var(--radius); border:1px solid var(--line); min-height:300px; overflow:hidden;}
 .map-card .brazil{position:absolute; inset:0; width:100%; height:100%;}
 .map-marker{position:absolute; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; cursor:pointer; z-index:2;}
+.map-marker:hover{z-index:10;}
 .map-marker .dot{width:14px; height:14px; border-radius:50%; border:3px solid #fff; box-shadow:0 1px 4px rgba(10,27,77,.3);}
-.map-marker .tag{margin-top:4px; font-size:10px; font-weight:700; background:#fff; padding:2px 7px; border-radius:6px; box-shadow:0 1px 3px rgba(10,27,77,.15); white-space:nowrap;}
+/* Rótulos ficam ocultos por padrão e só aparecem no hover/foco — com muitas
+   operações concentradas na mesma macro-região as tags sempre visíveis se
+   empilhavam umas sobre as outras (ilegível); o title já dá o nome no hover
+   do navegador, isso só deixa a etiqueta bonita também visível ali. */
+.map-marker .tag{position:absolute; top:100%; margin-top:4px; font-size:10px; font-weight:700; background:#fff; padding:2px 7px; border-radius:6px; box-shadow:0 1px 3px rgba(10,27,77,.15); white-space:nowrap; opacity:0; pointer-events:none; transition:opacity .1s;}
+.map-marker:hover .tag, .map-marker:focus .tag{opacity:1;}
 .map-caption{font-size:11px; color:var(--muted-2); margin-top:10px; text-align:center;}
 
 /* ============ chat / copiloto ============ */
@@ -406,6 +412,14 @@ let opFiltro = null;
 let DIESEL_PRECO_ASSUMIDO = EXTRA.preco_diesel_real || 6.00; // R$/L — real, calculado a partir do relatório de abastecimento (8 meses); editável em Configurações
 const HIST_PRECO_DIESEL_REAL = DIESEL_PRECO_ASSUMIDO; // guarda o valor real original, mesmo se o usuário sobrescrever
 let META_KML_REFERENCIA = null; // meta de km/L configurável em Configurações; null = sem meta definida
+// Faixa de km/L fisicamente plausível pra um caminhão — mesmos limites que o
+// import de Abastecimento já usa pra marcar uma combinação placa×mês como "não
+// elegível" (ver processarCsvAbastecimento). calcularMediaKmlDeLista() usa os
+// mesmos limites pra não deixar litros_consumidos mal importado/incompleto de
+// um mês específico (ex.: março com só uma fração do litros real do período)
+// inflar a média geral exibida — sem isso, meses com dado incompleto mostravam
+// km/L acima de 20, fisicamente impossível pra frota de caminhões.
+const KML_ELEGIVEL_MIN = 1.5, KML_ELEGIVEL_MAX = 5.0;
 
 /* =========================================================================
    ÍCONES
@@ -846,7 +860,12 @@ function eventosAbsVeiculo(v){ return ((v.frenagem||0)+(v.aceleracao||0)+(v.velo
 // já embutidos em HISTORICO_MESES (dado real, não inventado) + o período atual
 // selecionado. Respeita o filtro de operação do topo.
 function serieQuantidadeViolacoes(){
-  const meses = Object.keys(HISTORICO_MESES).sort();
+  // Só os meses de calendário reais (chave "AAAA-MM") entram nesse eixo — chaves
+  // de período importado na sessão ficam como "imp-"+timestamp (ver
+  // processarEAtualizarDados) e não são um mês, então não pertencem aqui. Sem
+  // esse filtro, o timestamp cru vazava pro rótulo do eixo X (ex.: "imp-
+  // 1758654321000".slice(5) virava um número de 12 dígitos no gráfico).
+  const meses = Object.keys(HISTORICO_MESES).filter(k=>/^\d{4}-\d{2}$/.test(k)).sort();
   const pontos = meses.map(mes=>{
     const base = HISTORICO_MESES[mes].veiculos||[];
     const veics = opFiltro ? base.filter(v=>v.operacao===opFiltro) : base;
@@ -867,11 +886,19 @@ function calcularMediaKmlDeLista(lista){
   // Função modular única: usada para a frota inteira OU para uma operação
   // filtrada — nunca lê um valor pré-calculado global, sempre soma de novo
   // a partir da lista recebida (parseFloat + guarda de divisão por zero).
+  // Descarta veículos com km/L individual fora da faixa plausível
+  // (KML_ELEGIVEL_MIN–MAX) antes de somar — mesma regra do import de
+  // Abastecimento, pra litros_consumidos incompleto/errado de um veículo não
+  // inflar a média de todo o período (ver nota em KML_ELEGIVEL_MIN acima).
   let km = 0, litros = 0;
   lista.forEach(v=>{
     const d = parseFloat(v.distancia_km) || 0;
     const l = parseFloat(v.litros_consumidos) || 0;
-    if(l>0){ km += Math.abs(d); litros += Math.abs(l); }
+    if(l>0){
+      const kmlIndividual = Math.abs(d)/Math.abs(l);
+      if(kmlIndividual<KML_ELEGIVEL_MIN || kmlIndividual>KML_ELEGIVEL_MAX) return;
+      km += Math.abs(d); litros += Math.abs(l);
+    }
   });
   return litros>0 ? Math.round((km/litros)*100)/100 : null;
 }
@@ -881,16 +908,21 @@ function calcularImpactoFinanceiro(){
   // junto e o gap desapareceria). Só a soma dos gaps (o que entra no valor
   // exibido) respeita o filtro de operação selecionado no topo da tela.
   const medias = mediaKmlPorOperacao();
-  let litrosExtras=0, consumoReal=0, consumoEsperado=0, veiculosAbaixo=0;
+  let litrosExtras=0, consumoReal=0, consumoEsperado=0;
+  const listaAbaixo=[], listaEsperado=[];
   veiculosAtuais().forEach(v=>{
     const mediaOp = medias[v.operacao];
     if(!mediaOp || !v.litros_consumidos || !v.estimativa_kml) return;
     consumoReal += v.litros_consumidos;
-    const esperado = v.distancia_km/mediaOp;
-    consumoEsperado += esperado;
+    const esperadoLitros = v.distancia_km/mediaOp;
+    consumoEsperado += esperadoLitros;
+    const linha = {placa:v.placa, operacao:v.operacao, km:v.distancia_km, kml:v.estimativa_kml, mediaOp};
     if(v.estimativa_kml < mediaOp){
-      const gap = v.litros_consumidos - esperado;
-      if(gap>0){ litrosExtras += gap; veiculosAbaixo++; }
+      const gap = v.litros_consumidos - esperadoLitros;
+      if(gap>0){ litrosExtras += gap; listaAbaixo.push({...linha, gap}); }
+      else listaEsperado.push(linha);
+    } else {
+      listaEsperado.push(linha);
     }
   });
   if(consumoReal===0) return null;
@@ -899,8 +931,28 @@ function calcularImpactoFinanceiro(){
     valorEstimado: Math.round(litrosExtras*DIESEL_PRECO_ASSUMIDO),
     consumoReal: Math.round(consumoReal),
     consumoEsperado: Math.round(consumoEsperado),
-    veiculosAbaixo,
+    veiculosAbaixo: listaAbaixo.length,
+    listaAbaixo: listaAbaixo.sort((a,b)=>b.gap-a.gap),
+    listaEsperado: listaEsperado.sort((a,b)=>b.kml-a.kml),
   };
+}
+function abrirImpactoModal(tipo){
+  const impacto = calcularImpactoFinanceiro();
+  if(!impacto) return;
+  const lista = tipo==='abaixo' ? impacto.listaAbaixo : impacto.listaEsperado;
+  const titulo = tipo==='abaixo' ? 'Veículos abaixo da média da operação' : 'Veículos dentro do esperado';
+  const overlay = el(`<div class="modal-overlay"></div>`);
+  overlay.innerHTML = `
+    <div class="modal-box" style="width:min(720px,94vw);">
+      <span class="close">&times;</span>
+      <h3 style="margin:0 0 4px;">${titulo}</h3>
+      <div class="muted" style="margin-bottom:14px;">${lista.length} veículo(s)${opFiltro?' · '+opFiltro:''} · a média de comparação é sempre da operação inteira (frota própria) · clique numa placa pra abrir o detalhe</div>
+      <div class="table-scroll"><table><thead><tr><th>Placa</th><th>Operação</th><th class="num">Km</th><th class="num">km/L</th><th class="num">Média op.</th>${tipo==='abaixo'?'<th class="num">Litros a mais</th>':''}</tr></thead>
+      <tbody>${lista.map(v=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="placa">${v.placa}</td><td>${v.operacao}</td><td class="num">${fmtInt(v.km)}</td><td class="num">${fmtNum(v.kml)}</td><td class="num muted">${fmtNum(v.mediaOp)}</td>${tipo==='abaixo'?`<td class="num" style="color:var(--red);"><b>+${fmtInt(v.gap)} L</b></td>`:''}</tr>`).join('')}</tbody></table></div>
+    </div>`;
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  overlay.querySelector('.close').addEventListener('click', ()=>overlay.remove());
+  document.body.appendChild(overlay);
 }
 
 /* =========================================================================
@@ -976,7 +1028,10 @@ function viewVisaoGeral(){
         <div class="card-sub">metodologia fixa: média km/L de cada operação → veículos abaixo dela → gap em litros × R$ ${fmtNum(DIESEL_PRECO_ASSUMIDO,2)}/L assumido</div>
         ${impacto ? `
           <div class="num" style="font-size:30px; color:var(--red); margin-bottom:4px;">${fmtMoney(impacto.valorEstimado)}</div>
-          <div class="muted" style="margin-bottom:14px;">${impacto.veiculosAbaixo} veículos abaixo da média da própria operação · ${fmtInt(impacto.litrosExtras)} L acima do esperado</div>
+          <div class="muted" style="margin-bottom:14px;">
+            <a href="javascript:void(0)" onclick="abrirImpactoModal('abaixo')" style="color:var(--red); font-weight:700; text-decoration:underline;">${impacto.veiculosAbaixo} veículos abaixo da média</a> da própria operação · ${fmtInt(impacto.litrosExtras)} L acima do esperado ·
+            <a href="javascript:void(0)" onclick="abrirImpactoModal('esperado')" style="color:var(--brand); font-weight:700; text-decoration:underline;">${impacto.listaEsperado.length} dentro do esperado</a>
+          </div>
           ${groupedBar(['Consumo'],[impacto.consumoReal],[impacto.consumoEsperado],'Real (L)','Esperado (L)')}
         ` : `<div class="empty" style="padding:20px;"><p>Sem litros suficientes na telemetria para estimar — importe o abastecimento para o cálculo oficial.</p></div>`}
       </div>
@@ -1022,12 +1077,12 @@ function top5OfensoresHtml(categoria){
   return `
     <h3>Top 5 Ofensores da Semana</h3>
     <div class="tabs" id="top5Tabs">${tabs.map(([id,l])=>`<div class="tab ${categoria===id?'active':''}" data-cat="${id}">${l}</div>`).join('')}</div>
-    <table><thead><tr><th>#</th><th>Placa</th><th class="num">Valor</th><th class="num">Gap vs frota</th></tr></thead>
+    <div class="table-scroll"><table><thead><tr><th>#</th><th>Placa</th><th class="num">Valor</th><th class="num">Gap vs frota</th></tr></thead>
     <tbody>${lista.map((v,i)=>{
       const val = v[sortKey]; const ref = categoria==='combustivel'?DATA.kpis.kml_estimado_geral:null;
       const gap = ref? fmtPct((val-ref)/ref*100,0)+'%' : '—';
-      return `<tr><td class="muted">${i+1}º</td><td class="placa">${v.placa}</td><td class="num">${fmtNum(val)}</td><td class="num">${gap}</td></tr>`;
-    }).join('')}</tbody></table>
+      return `<tr onclick="openVeiculoDetail('${v.placa}')"><td class="muted">${i+1}º</td><td class="placa">${v.placa}</td><td class="num">${fmtNum(val)}</td><td class="num">${gap}</td></tr>`;
+    }).join('')}</tbody></table></div>
   `;
 }
 
@@ -1046,31 +1101,98 @@ function renderOpDetail(){
   if(!area) return;
   if(!opFiltro){ area.innerHTML=''; return; }
   const o = DATA.por_operacao[opFiltro];
-  const veic = DATA.veiculos.filter(v=>v.operacao===opFiltro).sort((a,b)=>b.n_precisa_melhorar-a.n_precisa_melhorar);
+  const veic = DATA.veiculos.filter(v=>v.operacao===opFiltro);
+  PAGINA.opDetail = 1;
+  const tabAtual = renderOpDetail._tab || 'Resumo';
   area.innerHTML = `
     <div class="card">
       <div class="page-head" style="margin-bottom:12px;"><div><h3 style="font-size:18px;">${opFiltro}</h3></div></div>
       <div class="tabs" id="opTabs">
-        ${['Resumo','Eventos','Telemetria','Abastecimentos','Ocorrências','Documentos'].map((t,i)=>`<div class="tab ${i===0?'active':''}" data-tab="${t}">${t}</div>`).join('')}
+        ${['Resumo','Eventos','Telemetria','Abastecimentos'].map(t=>`<div class="tab ${tabAtual===t?'active':''}" data-tab="${t}">${t}</div>`).join('')}
       </div>
-      <div id="opTabContent">
-        <div class="grid g4" style="margin-bottom:16px;">
-          ${kpiCard('veiculos','Veículos', o.total)}
-          ${kpiCard('ofensores','Críticos', o.critico,'crit')}
-          ${kpiCard('rotas','Km total', fmtInt(o.km))}
-          ${kpiCard('combustivel','Litros', fmtInt(o.litros))}
-        </div>
-        <table><thead><tr><th>Placa</th><th class="num">Km</th><th>Status</th><th>Ponto de atenção</th></tr></thead>
-        <tbody>${veic.slice(0,20).map(v=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="placa">${v.placa}</td><td class="num">${fmtInt(v.distancia_km)}</td><td><span class="pill ${v.severidade}">${sevLabel(v.severidade)}</span></td><td>${v.ponto_atencao}</td></tr>`).join('')}</tbody></table>
-      </div>
+      <div id="opTabContent"></div>
     </div>`;
   document.querySelectorAll('#opTabs .tab').forEach(t=>t.addEventListener('click', ()=>{
     document.querySelectorAll('#opTabs .tab').forEach(x=>x.classList.remove('active'));
     t.classList.add('active');
-    if(t.dataset.tab!=='Resumo'){
-      document.getElementById('opTabContent').innerHTML = emptyState('operacoes', `${t.dataset.tab} ainda não disponível`, `Essa aba depende de uma importação que ainda não recebemos (log de eventos, abastecimento, ocorrências ou documentos da operação).`);
-    } else { renderOpDetail(); }
+    renderOpDetail._tab = t.dataset.tab;
+    PAGINA.opDetail = 1;
+    renderOpTabContent(veic, o);
   }));
+  renderOpTabContent(veic, o);
+}
+// Conteúdo real por aba — nada de placeholder "ainda não disponível": Eventos e
+// Telemetria já vêm da mesma telemetria importada (DATA.veiculos), Abastecimentos
+// soma as transações reais de ABASTECIMENTO_POR_PLACA das placas da operação.
+// Ocorrências/Documentos foram removidas (nenhuma importação alimenta essas abas).
+function renderOpTabContent(veic, o){
+  const tab = renderOpDetail._tab || 'Resumo';
+  const c = document.getElementById('opTabContent');
+  if(!c) return;
+  if(tab==='Resumo'){
+    const ordenado = veic.slice().sort((a,b)=>(calcularNota(a)??999)-(calcularNota(b)??999));
+    const {pagina, totalPaginas} = paginar(ordenado, 'opDetail', 20);
+    c.innerHTML = `
+      <div class="grid g4" style="margin-bottom:16px;">
+        ${kpiCard('veiculos','Veículos', o.total)}
+        ${kpiCard('ofensores','Críticos', o.critico,'crit')}
+        ${kpiCard('rotas','Km total', fmtInt(o.km))}
+        ${kpiCard('combustivel','Litros', fmtInt(o.litros))}
+      </div>
+      <div class="table-wrap"><div class="table-scroll"><table><thead><tr><th>Placa</th><th class="num">Km</th><th class="num">Nota</th><th>Status</th><th>Ponto de atenção</th></tr></thead>
+      <tbody>${pagina.map(v=>{ const nota=calcularNota(v); const st=classificarPorNota(nota); return `<tr onclick="openVeiculoDetail('${v.placa}')"><td class="placa">${v.placa}</td><td class="num">${fmtInt(v.distancia_km)}</td><td class="num">${nota??'—'}</td><td><span class="pill ${st==='critico'?'critico':(st==='bom'?'bom':'excelente')}">${st==='critico'?'Crítico':(st==='bom'?'Bom':'Excelente')}</span></td><td>${v.ponto_atencao||'—'}</td></tr>`; }).join('')}</tbody></table></div>
+      <div class="table-foot">${veic.length} veículo(s) na operação — todos, ordenados da nota mais baixa pra mais alta${paginacaoHtml('opDetail', totalPaginas)}</div>
+      </div>`;
+    bindPaginacao(c, ()=>renderOpTabContent(veic,o));
+  } else if(tab==='Eventos'){
+    const ordenado = veic.slice().sort((a,b)=>((b.frenagem||0)+(b.aceleracao||0)+(b.velocidade||0))-((a.frenagem||0)+(a.aceleracao||0)+(a.velocidade||0)));
+    const {pagina, totalPaginas} = paginar(ordenado, 'opDetail', 20);
+    c.innerHTML = veic.length ? `
+      <div class="card-sub" style="margin-bottom:10px;">eventos de telemetria por 100km, do maior pro menor</div>
+      <div class="table-wrap"><div class="table-scroll"><table><thead><tr><th>Placa</th><th class="num">Frenagens/100km</th><th class="num">Acelerações/100km</th><th class="num">Excesso vel./100km</th><th class="num">Marcha lenta %</th></tr></thead>
+      <tbody>${pagina.map(v=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="placa">${v.placa}</td><td class="num">${v.frenagem!==null?fmtNum(v.frenagem):'—'}</td><td class="num">${v.aceleracao!==null?fmtNum(v.aceleracao):'—'}</td><td class="num">${v.velocidade!==null?fmtNum(v.velocidade):'—'}</td><td class="num">${v.marcha_lenta!==null?fmtPct(v.marcha_lenta):'—'}</td></tr>`).join('')}</tbody></table></div>
+      <div class="table-foot">${veic.length} veículo(s)${paginacaoHtml('opDetail', totalPaginas)}</div></div>`
+      : emptyState('telemetria','Sem veículos nesta operação','Nenhum veículo encontrado para esta operação na seleção atual.');
+    bindPaginacao(c, ()=>renderOpTabContent(veic,o));
+  } else if(tab==='Telemetria'){
+    const media = campo => { const l=veic.filter(v=>v[campo]!==null); return l.length? l.reduce((a,v)=>a+v[campo],0)/l.length : null; };
+    const badge = (label) => label==='Muito bom'?'excelente':(label==='Bom'?'bom':(label==='Atenção'?'atencao':(label==='Precisa melhorar'?'critico':'')));
+    const mFx=media('faixa_verde'), mRpm=media('rpm'), mFren=media('frenagem'), mAcel=media('aceleracao'), mVel=media('velocidade'), mMarcha=media('marcha_lenta');
+    const indicadores = [
+      {ico:'drops', lbl:'Faixa verde (média)', val: mFx!==null?fmtPct(mFx)+'%':'—', cls: classificarFaixaVerde(mFx)},
+      {ico:'telemetria', lbl:'RPM elevado (média)', val: mRpm!==null?fmtPct(mRpm,2)+'%':'—', cls: classificarRpm(mRpm)},
+      {ico:'ofensores', lbl:'Frenagens bruscas (média)', val: mFren!==null?fmtNum(mFren)+' /100km':'—', cls: classificarFrenAcel(mFren,[0.03,0.07,0.12])},
+      {ico:'veiculos', lbl:'Acelerações bruscas (média)', val: mAcel!==null?fmtNum(mAcel)+' /100km':'—', cls: classificarFrenAcel(mAcel,[0.02,0.05,0.10])},
+      {ico:'alertas', lbl:'Excesso de velocidade (média)', val: mVel!==null?fmtNum(mVel)+' /100km':'—', cls: classificarVelocidade(mVel)},
+      {ico:'rotas', lbl:'Marcha lenta (média)', val: mMarcha!==null?fmtPct(mMarcha)+'%':'—', cls: classificarMarchaLenta(mMarcha)},
+    ];
+    c.innerHTML = `
+      <div class="card-sub" style="margin-bottom:10px;">média simples dos ${veic.length} veículos da operação nesta semana — mesmos 6 indicadores e faixas oficiais usados no painel de cada placa</div>
+      <div class="grid g2">
+        ${indicadores.map(i=>`<div class="kpi"><div class="ico">${ICONS[i.ico]}</div><div class="body">
+          <div class="lbl">${i.lbl}</div>
+          <div class="num" style="font-size:17px;">${i.val}</div>
+          <div class="delta"><span class="pill dot ${badge(i.cls)}" style="margin-top:3px;">${i.cls}</span></div>
+        </div></div>`).join('')}
+      </div>`;
+  } else if(tab==='Abastecimentos'){
+    const txs = veic.flatMap(v=>(ABASTECIMENTO_POR_PLACA[v.placa]||[]).map(t=>({...t, placa:v.placa})));
+    if(!txs.length){ c.innerHTML = emptyState('combustivel','Sem abastecimento importado para esta operação','Importe o relatório de Abastecimento em Importações para ver litros e km reais desta operação.','Ir para Importações'); return; }
+    const totalLitros = txs.reduce((a,t)=>a+(t.litros||0),0);
+    const totalKm = txs.reduce((a,t)=>a+(t.km_total||0),0);
+    const porPlaca = {};
+    txs.forEach(t=>{ if(!porPlaca[t.placa]) porPlaca[t.placa]={litros:0,km:0}; porPlaca[t.placa].litros+=t.litros||0; porPlaca[t.placa].km+=t.km_total||0; });
+    c.innerHTML = `
+      <div class="grid g3" style="margin-bottom:16px;">
+        ${kpiCard('combustivel','Litros abastecidos', fmtInt(totalLitros))}
+        ${kpiCard('rotas','Km rodado', fmtInt(totalKm))}
+        ${kpiCard('drops','Média (km/L)', totalLitros?fmtNum(totalKm/totalLitros):'—')}
+      </div>
+      <div class="table-wrap"><div class="table-scroll"><table><thead><tr><th>Placa</th><th class="num">Litros</th><th class="num">Km</th><th class="num">km/L</th></tr></thead>
+      <tbody>${Object.entries(porPlaca).sort((a,b)=>b[1].litros-a[1].litros).map(([p,d])=>`<tr onclick="openVeiculoDetail('${p}')"><td class="placa">${p}</td><td class="num">${fmtNum(d.litros,1)}</td><td class="num">${fmtInt(d.km)}</td><td class="num">${d.litros?fmtNum(d.km/d.litros):'—'}</td></tr>`).join('')}</tbody></table></div>
+      <div class="table-foot">${Object.keys(porPlaca).length} placa(s) com abastecimento importado nesta operação</div>
+      </div>`;
+  }
 }
 
 /* =========================================================================
@@ -1932,7 +2054,19 @@ let ABASTECIMENTO = null; // {evolucao, mediaOficialGeral, log} — independente
 let ABASTECIMENTO_POR_PLACA = {}; // placa -> [{data,litros,km_total}] — alimenta a aba Abastecimento do veículo
 let FALHAS_POR_PLACA = {}; // placa -> [{data,descricao}] — alimenta a aba Manutenção do veículo
 let FALHAS_ATUAIS = []; // lista de falhas renderizada agora na aba Manutenção — referência p/ o modal de detalhe
-let PX_MOTORISTAS = []; // [{nome,uf,tipo_veiculo,dias,diaria}] — acumulado de todos os arquivos de Motoristas PX importados na sessão
+// Planilha real de Motoristas PX (export de torre/TMS) enviada em 22/09/2026 —
+// embutida como padrão pra não depender de reimportar toda sessão. Atualizável
+// em Configurações > Planilha de Motoristas PX (substitui e persiste via
+// localStorage neste navegador; sem backend, não sincroniza entre máquinas).
+const PX_MOTORISTAS_PADRAO = [{"nome":"ANDERSON ALEXANDRE DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"23/06/2026 10:00","chegada":"30/06/2026 10:00","status":"Selecionado"},{"nome":"RAFAEL CRUZ DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"23/06/2026 16:00","chegada":"30/06/2026 16:00","status":"Selecionado"},{"nome":"EDSON CAVALCANTE","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"23/06/2026 11:00","chegada":"30/06/2026 11:00","status":"Selecionado"},{"nome":"JOSE LUIZ RODRIGUES ELOI","uf":"PR","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 09:00","chegada":"29/06/2026 09:00","status":"Selecionado"},{"nome":"MARCO ANTONIO OLIVEIRA SANTOS","uf":"ES","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"24/06/2026 10:00","chegada":"01/07/2026 10:00","status":"Selecionado"},{"nome":"LEANDRO SCHUSTER","uf":"SC","tipo_veiculo":"Carreta LS","dias":79.0,"diaria":330.0,"saida":"07/04/2026 14:00","chegada":"25/06/2026 14:00","status":"Carregado"},{"nome":"JOSE ROMAO MARQUES","uf":"SP","tipo_veiculo":"Carreta LS","dias":74.5,"diaria":330.0,"saida":"10/04/2026 10:30","chegada":"23/06/2026 22:30","status":"Carregado"},{"nome":"RONICLEY OSNILDO QUINTINO","uf":"SC","tipo_veiculo":"Carreta LS","dias":77.5,"diaria":330.0,"saida":"07/04/2026 09:30","chegada":"23/06/2026 21:30","status":"Carregado"},{"nome":"WESLLEY DELATORRE AMORIM","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":49.0,"diaria":400.0,"saida":"06/05/2026 13:00","chegada":"24/06/2026 13:00","status":"Carregado"},{"nome":"JOSEMILTON FERREIRA DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":49.0,"diaria":400.0,"saida":"06/05/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"RONALDO DE FIGUEIREDO DOS SANTOS JUNIOR","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":48.0,"diaria":400.0,"saida":"07/05/2026 10:00","chegada":"23/06/2026 10:30","status":"Carregado"},{"nome":"OGIER SOARES DE SOUZA","uf":"SP","tipo_veiculo":"Carreta LS","dias":42.0,"diaria":330.0,"saida":"13/05/2026 09:00","chegada":"24/06/2026 09:00","status":"Carregado"},{"nome":"EDNALDO MENDES DE BRITO","uf":"SP","tipo_veiculo":"Carreta LS","dias":37.0,"diaria":330.0,"saida":"14/05/2026 09:00","chegada":"20/06/2026 09:00","status":"Carregado"},{"nome":"JOSE EDUARDO OLIVEIRA DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":42.0,"diaria":400.0,"saida":"12/05/2026 13:00","chegada":"23/06/2026 13:00","status":"Carregado"},{"nome":"ROGERIO PEDRO DE OLIVEIRA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":42.0,"diaria":400.0,"saida":"12/05/2026 17:30","chegada":"23/06/2026 17:30","status":"Carregado"},{"nome":"ESTER SILVA DE SOUZA STOFELES","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":40.0,"diaria":400.0,"saida":"15/05/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"LUCIANO DO CARMO STOFELES","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":40.0,"diaria":400.0,"saida":"15/05/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"ALESSANDRO BATISTA DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":35.0,"diaria":330.0,"saida":"19/05/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"FERNANDO ROBERTO DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":35.0,"diaria":330.0,"saida":"19/05/2026 18:00","chegada":"23/06/2026 18:00","status":"Carregado"},{"nome":"JOSE PEREIRA SOBRINHO","uf":"SP","tipo_veiculo":"Carreta LS","dias":32.0,"diaria":330.0,"saida":"23/05/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"DAVID DE ANDRADE","uf":"SP","tipo_veiculo":"Carreta LS","dias":22.0,"diaria":330.0,"saida":"02/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"MARCO MACIEL DE SOBRAL","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":28.0,"diaria":400.0,"saida":"26/05/2026 10:00","chegada":"23/06/2026 10:00","status":"Carregado"},{"nome":"ROBSON PINHEIRO DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":29.0,"diaria":330.0,"saida":"24/05/2026 08:00","chegada":"22/06/2026 08:00","status":"Carregado"},{"nome":"ALEXANDRE OLIVEIRA LAGE","uf":"SP","tipo_veiculo":"Carreta LS","dias":28.0,"diaria":330.0,"saida":"26/05/2026 10:00","chegada":"23/06/2026 10:00","status":"Carregado"},{"nome":"RIADLEY CARVALHO DE OLIVEIRA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":28.0,"diaria":400.0,"saida":"26/05/2026 12:00","chegada":"23/06/2026 12:00","status":"Carregado"},{"nome":"EDIRLEI BRESSAN","uf":"SP","tipo_veiculo":"Carreta LS","dias":28.0,"diaria":330.0,"saida":"26/05/2026 11:00","chegada":"23/06/2026 11:00","status":"Carregado"},{"nome":"TIAGO TIBIRICA PUREZA DE PELEGRIN","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":29.0,"diaria":400.0,"saida":"26/05/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"RAYLTON FERREIRA ALMEIDA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":28.0,"diaria":400.0,"saida":"26/05/2026 12:00","chegada":"23/06/2026 12:00","status":"Carregado"},{"nome":"ANDREA BARROS MOREIRA","uf":"SC","tipo_veiculo":"Carreta LS","dias":29.0,"diaria":363.0,"saida":"26/05/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"THIAGO DE OLIVEIRA SOUZA","uf":"SP","tipo_veiculo":"Carreta LS","dias":29.0,"diaria":330.0,"saida":"26/05/2026 16:00","chegada":"24/06/2026 16:00","status":"Carregado"},{"nome":"UZIEL SOUSA SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":28.0,"diaria":330.0,"saida":"27/05/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"OSVALDO SEBASTIAN NOLA","uf":"SC","tipo_veiculo":"Carreta LS","dias":27.0,"diaria":330.0,"saida":"29/05/2026 10:00","chegada":"25/06/2026 10:00","status":"Carregado"},{"nome":"JOãO GABRIEL EMIDIO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":28.0,"diaria":400.0,"saida":"27/05/2026 00:00","chegada":"24/06/2026 00:00","status":"Carregado"},{"nome":"MACKSON DE LIMA SOUTO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":28.0,"diaria":400.0,"saida":"27/05/2026 20:00","chegada":"24/06/2026 20:00","status":"Carregado"},{"nome":"GILDETE GOMES DA ROCHA","uf":"SP","tipo_veiculo":"Carreta LS","dias":26.0,"diaria":330.0,"saida":"29/05/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"MARCIO LEITE RAMOS DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":23.0,"diaria":330.0,"saida":"01/06/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"MARLON ROGéRIO SILVESTRE","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":26.0,"diaria":400.0,"saida":"29/05/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"PEDRO PAULO COSTA DA CUNHA","uf":"SC","tipo_veiculo":"Carreta LS","dias":28.0,"diaria":363.0,"saida":"28/05/2026 18:00","chegada":"25/06/2026 18:00","status":"Carregado"},{"nome":"PAULO VICTOR LEAL DE SOUSA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":21.0,"diaria":400.0,"saida":"01/06/2026 10:00","chegada":"22/06/2026 10:00","status":"Carregado"},{"nome":"JUSCELINO FERREIRA DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":23.0,"diaria":400.0,"saida":"01/06/2026 13:00","chegada":"24/06/2026 13:00","status":"Carregado"},{"nome":"EDUARDO DE OLIVEIRA PRIA","uf":"SP","tipo_veiculo":"Carreta LS","dias":18.0,"diaria":330.0,"saida":"05/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"JOSILDO MACIEL DE BARROS","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":21.0,"diaria":400.0,"saida":"03/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"FABIANO DO CARMO PACHIEL","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"03/06/2026 11:00","chegada":"24/06/2026 11:00","status":"Carregado"},{"nome":"JOSE ROGERIO DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":21.0,"diaria":400.0,"saida":"02/06/2026 16:00","chegada":"23/06/2026 16:00","status":"Carregado"},{"nome":"ACIDINALDO SANTANA DE SOUZA","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"03/06/2026 15:00","chegada":"24/06/2026 15:00","status":"Carregado"},{"nome":"NILTON DE OLIVEIRA ALMEIDA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":21.0,"diaria":400.0,"saida":"03/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"MIGUEL ANTONIO YNFANTE FLORES","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"02/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"MARCIO SANTOS SANTANA","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"03/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"EDER DA SILVA ANDRADE","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":21.0,"diaria":400.0,"saida":"02/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"RENATO CARLOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"02/06/2026 11:15","chegada":"23/06/2026 11:15","status":"Carregado"},{"nome":"JONES DOS SANTOS GOES","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"03/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"MANOEL OLIVEIRA DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"03/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"RONALDO LOPES","uf":"SP","tipo_veiculo":"Carreta LS","dias":21.0,"diaria":330.0,"saida":"03/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"REGINALDO SILVA DE AMORIM","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":18.0,"diaria":400.0,"saida":"06/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"ANDRE RICARDO LAZARO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":17.0,"diaria":400.0,"saida":"07/06/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"JULIO CESAR HERNANDEZ SALAS","uf":"SP","tipo_veiculo":"Carreta LS","dias":22.0,"diaria":330.0,"saida":"02/06/2026 18:00","chegada":"24/06/2026 18:00","status":"Carregado"},{"nome":"GUILHERME DE ALMEIDA DOS SANTOS","uf":"SC","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":363.0,"saida":"09/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"ANTONIO CARLOS NUNES BRANDAO","uf":"SC","tipo_veiculo":"Carreta LS","dias":20.0,"diaria":363.0,"saida":"06/06/2026 14:00","chegada":"26/06/2026 14:00","status":"Carregado"},{"nome":"EDMILSON SANTOS DE ARAUJO","uf":"SP","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"09/06/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"BRUNO LUIS VICENTE WOLSKI","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"09/06/2026 10:00","chegada":"23/06/2026 10:00","status":"Carregado"},{"nome":"ISMAEL ANIBAL DA SILVA","uf":"SC","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"MARCOS PAIM DE OLIVEIRA","uf":"SC","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"08/06/2026 10:00","chegada":"23/06/2026 10:00","status":"Carregado"},{"nome":"FELIPE FEITOSA MOTA DE OLIVEIRA","uf":"SP","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"08/06/2026 14:00","chegada":"23/06/2026 14:00","status":"Carregado"},{"nome":"VINICIUS MANHAES DE SOUZA","uf":"SP","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"09/06/2026 14:00","chegada":"24/06/2026 14:00","status":"Carregado"},{"nome":"LEANDRO ROMUALDO DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"08/06/2026 12:30","chegada":"22/06/2026 12:30","status":"Carregado"},{"nome":"GELSON LEAL","uf":"SC","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 06:00","chegada":"25/06/2026 06:00","status":"Carregado"},{"nome":"RENATO DA SILVA MIRANDA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"FAGNER MACHADO GARCIA","uf":"SC","tipo_veiculo":"Manobrista E","dias":15.0,"diaria":285.0,"saida":"08/06/2026 15:30","chegada":"24/06/2026 16:30","status":"Carregado"},{"nome":"JOAO BATISTA LEMOS DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"09/06/2026 19:00","chegada":"23/06/2026 19:00","status":"Carregado"},{"nome":"JULIANO DE SOUZA PINHEIRO","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"09/06/2026 16:00","chegada":"23/06/2026 16:00","status":"Carregado"},{"nome":"WELLINGTON LUIZ DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"09/06/2026 10:30","chegada":"23/06/2026 10:30","status":"Carregado"},{"nome":"JOSE LINDOMAR VIANA BARBOSA","uf":"SP","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"09/06/2026 18:00","chegada":"24/06/2026 18:00","status":"Carregado"},{"nome":"EDER CARLOS DE SOUZA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":15.0,"diaria":400.0,"saida":"09/06/2026 18:00","chegada":"24/06/2026 18:00","status":"Carregado"},{"nome":"MAURILIO VIEIRA DE LIMA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"09/06/2026 18:00","chegada":"23/06/2026 18:00","status":"Carregado"},{"nome":"JOSE ARES SOUZA OLIVEIRA","uf":"SP","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"09/06/2026 16:00","chegada":"24/06/2026 16:00","status":"Carregado"},{"nome":"RONI DO NASCIMENTO SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":15.0,"diaria":330.0,"saida":"09/06/2026 16:00","chegada":"24/06/2026 16:00","status":"Carregado"},{"nome":"WILLIAN CINTRA DE OLIVEIRA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"11/06/2026 08:00","chegada":"25/06/2026 08:00","status":"Carregado"},{"nome":"LUIZ CARLOS DA SILVA SENA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":13.0,"diaria":400.0,"saida":"12/06/2026 08:00","chegada":"25/06/2026 08:00","status":"Carregado"},{"nome":"LUIZ FERNANDO DE BARROS MACHADO","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 08:00","chegada":"25/06/2026 08:00","status":"Carregado"},{"nome":"GILMAR DE SOUZA SERGIO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"09/06/2026 18:00","chegada":"23/06/2026 18:00","status":"Carregado"},{"nome":"REGINALDO PORTO","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"15/06/2026 13:30","chegada":"22/06/2026 13:30","status":"Carregado"},{"nome":"BENICIO ARAUJO","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 10:00","chegada":"25/06/2026 10:00","status":"Carregado"},{"nome":"SIDNEI VIDAL TEODORO","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 15:00","chegada":"24/06/2026 15:00","status":"Carregado"},{"nome":"DANIEL CAVALCANTI SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"15/06/2026 11:00","chegada":"22/06/2026 11:00","status":"Carregado"},{"nome":"JOSIANE DE LIMA","uf":"SC","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 08:00","chegada":"25/06/2026 08:00","status":"Carregado"},{"nome":"FABRICIO DE CARVALHO E SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"12/06/2026 08:00","chegada":"26/06/2026 08:00","status":"Carregado"},{"nome":"VALÉRIO MARIANO","uf":"SC","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":363.0,"saida":"11/06/2026 08:00","chegada":"25/06/2026 08:00","status":"Carregado"},{"nome":"CLAUDIO SANTOS ALVES","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"12/06/2026 11:00","chegada":"26/06/2026 11:00","status":"Carregado"},{"nome":"ELICARLOS SOUSA NASCIMENTO","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"15/06/2026 09:00","chegada":"22/06/2026 09:00","status":"Carregado"},{"nome":"ANDRE LUIZ MENDES","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 10:00","chegada":"25/06/2026 10:00","status":"Carregado"},{"nome":"WESLEI SILVA SANTOS","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"12/06/2026 08:00","chegada":"26/06/2026 08:00","status":"Carregado"},{"nome":"GENIVAL NEVES DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 12:30","chegada":"24/06/2026 12:30","status":"Carregado"},{"nome":"ALEXANDRO DE OLIVEIRA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"10/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"DANILO LEANDRO SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 16:00","chegada":"25/06/2026 16:00","status":"Carregado"},{"nome":"ELVANO PEREIRA DA PENHA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"10/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"ALINALDO COSTA BOMFIM","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"ROGERIO APARECIDO DIAS DA ROSA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 12:30","chegada":"24/06/2026 12:30","status":"Carregado"},{"nome":"GILENO OLIVEIRA DA PAZ","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 15:30","chegada":"24/06/2026 15:30","status":"Carregado"},{"nome":"PAULO SERGIO DA SILVA","uf":"PR","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 13:00","chegada":"24/06/2026 13:00","status":"Carregado"},{"nome":"LUCIANO HIRSCH DE VASCONCELOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 13:00","chegada":"24/06/2026 13:00","status":"Carregado"},{"nome":"FRANCIELEN VIEIRA COSTA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"10/06/2026 13:00","chegada":"24/06/2026 13:00","status":"Carregado"},{"nome":"CELIO DA SILVA SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 13:00","chegada":"24/06/2026 13:00","status":"Carregado"},{"nome":"RENATO FERREIRA DE MORAES","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"10/06/2026 16:30","chegada":"24/06/2026 16:30","status":"Carregado"},{"nome":"SIDNEY ROBERTO TOME","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"10/06/2026 16:00","chegada":"24/06/2026 16:00","status":"Carregado"},{"nome":"WESLEI SANTOS FERREIRA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"10/06/2026 16:30","chegada":"24/06/2026 16:30","status":"Carregado"},{"nome":"DOUGLAS SOARES XAVIER","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"10/06/2026 18:00","chegada":"24/06/2026 18:00","status":"Carregado"},{"nome":"RAFAELA APARECIDA OLIVEIRA FRANCO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"15/06/2026 13:00","chegada":"22/06/2026 13:00","status":"Carregado"},{"nome":"EDSON ROSA DA MOTTA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":14.0,"diaria":400.0,"saida":"12/06/2026 16:00","chegada":"26/06/2026 16:00","status":"Carregado"},{"nome":"GIL ZIMAR SOARES DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":330.0,"saida":"11/06/2026 12:00","chegada":"25/06/2026 12:00","status":"Carregado"},{"nome":"ALIS ANTONIO SOJO PEREZ","uf":"SC","tipo_veiculo":"Carreta LS","dias":14.0,"diaria":363.0,"saida":"11/06/2026 22:00","chegada":"25/06/2026 22:00","status":"Carregado"},{"nome":"LETICIA APARECIDA DE SOUZA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":8.0,"diaria":400.0,"saida":"14/06/2026 15:00","chegada":"22/06/2026 15:00","status":"Carregado"},{"nome":"MATHEUS HENRIQUE COSTA BALBINO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":8.0,"diaria":400.0,"saida":"14/06/2026 15:00","chegada":"22/06/2026 15:00","status":"Carregado"},{"nome":"ANGELO MOURA DUARTE","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"16/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"MATHEUS DA CONCEICAO DIEGUES","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"15/06/2026 16:00","chegada":"22/06/2026 16:00","status":"Carregado"},{"nome":"JOSE BISMARK LOPES DA NOBREGA","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"18/06/2026 09:00","chegada":"25/06/2026 09:00","status":"Carregado"},{"nome":"MAIKON ALEXSSANDER HOSTIN","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":363.0,"saida":"16/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"MARCOS AURELIO VARGAS RANGEL","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"16/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"ERISSON BARROS CORREA","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"18/06/2026 08:00","chegada":"25/06/2026 08:00","status":"Carregado"},{"nome":"SERGIO HENRIQUE DA SILVA ALVARENGA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"15/06/2026 12:00","chegada":"22/06/2026 12:00","status":"Carregado"},{"nome":"MARCONDES ALBERTO QUEIROZ COSTA","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"15/06/2026 14:00","chegada":"22/06/2026 14:00","status":"Carregado"},{"nome":"JULIO CESAR DA COSTA FARIA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":10.0,"diaria":400.0,"saida":"16/06/2026 16:00","chegada":"26/06/2026 16:00","status":"Carregado"},{"nome":"EDIMILSON DE SOUSA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"16/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"MARCELO ALVES DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"16/06/2026 09:00","chegada":"23/06/2026 09:00","status":"Carregado"},{"nome":"PEDRO EDUARDO CARDOSO SOUSA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"16/06/2026 19:00","chegada":"23/06/2026 19:00","status":"Carregado"},{"nome":"CARLOS ALBERTO JORGE JUNIOR","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"16/06/2026 19:00","chegada":"23/06/2026 19:00","status":"Carregado"},{"nome":"ISAIAS GOMES","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"16/06/2026 20:00","chegada":"23/06/2026 20:00","status":"Carregado"},{"nome":"JOSE ALBERTO BARBOSA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"15/06/2026 09:00","chegada":"22/06/2026 09:00","status":"Carregado"},{"nome":"WILLIAM OLIVEIRA LESSA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"16/06/2026 16:00","chegada":"23/06/2026 16:00","status":"Carregado"},{"nome":"LUIZ CARLOS DE SOUZA JUNIOR","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"16/06/2026 16:00","chegada":"23/06/2026 16:00","status":"Carregado"},{"nome":"SONISLEY BARBOSA DOS SANTOS BARROS JORGE","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"16/06/2026 19:00","chegada":"23/06/2026 19:00","status":"Carregado"},{"nome":"RONALDO NUNES DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"WELLINGTON SOUZA DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"IVAM WELLEN DE SANTANA DE ALMEIDA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 16:00","chegada":"24/06/2026 16:00","status":"Carregado"},{"nome":"JOAQUIM BARBOSA LIMA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"19/06/2026 10:00","chegada":"26/06/2026 10:00","status":"Carregado"},{"nome":"LEANDRO APARECIDO DIAS","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"17/06/2026 16:00","chegada":"24/06/2026 16:00","status":"Carregado"},{"nome":"JONATAS SANTOS PEREIRA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"16/06/2026 20:00","chegada":"23/06/2026 20:00","status":"Carregado"},{"nome":"RENATO DOS SANTOS RODRIGUES","uf":"ES","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"16/06/2026 08:00","chegada":"23/06/2026 08:00","status":"Carregado"},{"nome":"ALLAN ROBERTO AYRES DE LIMA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"ALEXANDRE COUTO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"17/06/2026 08:00","chegada":"24/06/2026 08:00","status":"Carregado"},{"nome":"ANDERSON PACHECO SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 10:00","chegada":"29/06/2026 10:00","status":"A caminho"},{"nome":"EDEILTON OLIVEIRA DE JESUS SANTOS","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"19/06/2026 22:30","chegada":"26/06/2026 22:30","status":"Carregado"},{"nome":"EDSON LEONARDO BARROSO MENDES","uf":"RO","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"20/06/2026 07:00","chegada":"27/06/2026 07:00","status":"Carregado"},{"nome":"ANÉSIO SOARES","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"17/06/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"RODOLFO JOSE MELENDEZ LANZ","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 12:00","chegada":"24/06/2026 12:00","status":"Carregado"},{"nome":"CELINO DA SILVA","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"19/06/2026 16:00","chegada":"26/06/2026 16:00","status":"A caminho"},{"nome":"IVAN APARECIDO DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"17/06/2026 10:00","chegada":"24/06/2026 10:00","status":"Carregado"},{"nome":"ELIAS RIBEIRO LEMOS DE LIMA SILVA","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":7.0,"diaria":400.0,"saida":"17/06/2026 14:15","chegada":"24/06/2026 14:15","status":"Carregado"},{"nome":"ANDRES ANDRE RIVERA MARTINEZ","uf":"SC","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 10:00","chegada":"29/06/2026 10:00","status":"Selecionado"},{"nome":"IZIDORIO JOSE CORREIA FILHO","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 10:00","chegada":"29/06/2026 10:00","status":"A caminho"},{"nome":"DANILO SILVA DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"18/06/2026 13:00","chegada":"25/06/2026 13:00","status":"Carregado"},{"nome":"ERIK DE OLIVEIRA TENORIO","uf":"SP","tipo_veiculo":"Carreta LS (viagem em dupla)","dias":6.0,"diaria":400.0,"saida":"20/06/2026 08:00","chegada":"26/06/2026 08:00","status":"Carregado"},{"nome":"JAILSON PEREIRA DOS SANTOS","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 10:00","chegada":"29/06/2026 10:00","status":"A caminho"},{"nome":"WELLINGTON ROBISON DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 10:00","chegada":"29/06/2026 10:00","status":"A caminho"},{"nome":"RICARDO ACOSTA","uf":"SP","tipo_veiculo":"Carreta LS","dias":7.0,"diaria":330.0,"saida":"22/06/2026 09:00","chegada":"29/06/2026 09:00","status":"A caminho"},{"nome":"JOSEVAL VALERIO DA SILVA","uf":"SP","tipo_veiculo":"Carreta LS","dias":6.0,"diaria":330.0,"saida":"20/06/2026 08:00","chegada":"26/06/2026 08:00","status":"Carregado"},{"nome":"LUCIANO DE OLIVEIRA AMORIM","uf":"SP","tipo_veiculo":"Carreta LS","dias":8.0,"diaria":330.0,"saida":"21/06/2026 13:00","chegada":"29/06/2026 13:00","status":"Carregado"}];
+function carregarPxSalvo(){
+  try{ const raw = localStorage.getItem('cordenonsi_px_motoristas'); if(raw) return JSON.parse(raw); }catch(e){}
+  return null;
+}
+function salvarPxNoNavegador(lista){
+  try{ localStorage.setItem('cordenonsi_px_motoristas', JSON.stringify(lista)); localStorage.setItem('cordenonsi_px_atualizado_em', new Date().toLocaleString('pt-BR')); }catch(e){}
+}
+let PX_MOTORISTAS = carregarPxSalvo() || PX_MOTORISTAS_PADRAO.slice();
 let PX_FROTA = null; // resultado de recalcularPxFrota() — recalculado a cada import de PX/Cargas e a cada troca de período
 
 function detectarTipoArquivo(headerLine){
@@ -1940,7 +2074,7 @@ function detectarTipoArquivo(headerLine){
   if(h.includes('nome do veiculo') && h.includes('movimento')) return 'autotrac';
   if(h.includes('falha') || h.includes('defeito') || h.includes('violacao') || h.includes('diagnostico') || (h.includes('spn') && h.includes('fmi'))) return 'falhas';
   if(h.includes('litros') && (h.includes('segmento') || h.includes('km total') || h.includes('km anterior'))) return 'abastecimento';
-  if(h.includes('diaria') && (h.includes('motorista') || h.includes('nome')) && !h.includes('litros') && !h.includes('origem')) return 'px';
+  if(h.includes('motorista') && (h.includes('valor dia') || h.includes('diaria')) && !h.includes('litros') && !h.includes('origem')) return 'px';
   if(h.includes('origem') && h.includes('destino') && h.includes('peso')) return 'cargas';
   if(h.includes('placa') && (h.includes('marca') || h.includes('modelo')) && !h.includes('movimento')) return 'cadastro_veiculos';
   return 'desconhecido';
@@ -1951,27 +2085,33 @@ function detectarTipoArquivo(headerLine){
 // Motorista, UF, Tipo de Veículo, Dias e Valor da Diária. Se o cabeçalho real
 // vier diferente, o erro abaixo mostra as colunas encontradas para ajuste.
 function processarCsvPx(texto){
-  const linhas = texto.replace(/^﻿/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const linhas = linhasComCabecalho(texto);
   const delim = detectarDelimitador(linhas[0]);
   const header = linhas[0].split(delim).map(h=>h.replace(/^"|"$/g,''));
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
+  // Cabeçalho real (export de torre/TMS): ID Torre.txt; Nome do cliente; Motorista;
+  // UF; Tipo; Valor Dia; Saída; Chegada; Dias; Status; GR; Tipo de veículo; Tipo de
+  // implemento — sem coluna de placa (por isso o cruzamento com Cargas por nome).
   const cNome = acharColuna(idx,'Motorista','Nome','Nome do Motorista');
   const cUf = acharColuna(idx,'UF','Estado');
   const cTipo = acharColuna(idx,'Tipo de Veículo','Tipo de Veiculo','Veículo','Veiculo');
   const cDias = acharColuna(idx,'Dias','Diárias','Diarias','Quantidade de Dias','Qtd Dias');
-  const cDiaria = acharColuna(idx,'Diária','Diaria','Valor da Diária','Valor da Diaria','Valor Diária');
-  const cData = acharColuna(idx,'Data','Data Início','Data Inicio','Período','Periodo');
-  if(cNome===undefined) throw new Error('Coluna "Motorista"/"Nome" não encontrada no relatório de Motoristas PX. Cabeçalho: '+header.join(' | '));
+  const cDiaria = acharColuna(idx,'Valor Dia','Valor Diária','Valor da Diária','Diária','Diaria','Valor da Diaria');
+  const cSaida = acharColuna(idx,'Saída','Saida','Data','Data Início','Data Inicio');
+  const cChegada = acharColuna(idx,'Chegada','Data Fim');
+  const cStatus = acharColuna(idx,'Status');
+  if(cNome===undefined) throw new Error('Coluna "Motorista" não encontrada no relatório de Motoristas PX. Cabeçalho: '+header.join(' | '));
   const registros=[]; const datasEncontradas=[];
   for(let i=1;i<linhas.length;i++){
     const r = linhas[i].split(delim).map(c=>c.replace(/^"|"$/g,''));
     if(r.length<2) continue;
     const nome = (r[cNome]||'').trim();
     if(!nome) continue;
-    const dataStr = cData!==undefined?(r[cData]||'').trim():'';
+    const dataStr = cSaida!==undefined?(r[cSaida]||'').trim():'';
     registros.push({
       nome, uf: cUf!==undefined?(r[cUf]||'').trim():'', tipo_veiculo: cTipo!==undefined?(r[cTipo]||'').trim():'',
-      dias: cDias!==undefined?brFloat(r[cDias]):null, diaria: cDiaria!==undefined?brFloat(r[cDiaria]):null, data: dataStr,
+      dias: cDias!==undefined?brFloat(r[cDias]):null, diaria: cDiaria!==undefined?brFloat(r[cDiaria]):null,
+      saida: dataStr, chegada: cChegada!==undefined?(r[cChegada]||'').trim():'', status: cStatus!==undefined?(r[cStatus]||'').trim():'',
     });
     if(dataStr) datasEncontradas.push(dataStr);
   }
@@ -2030,7 +2170,7 @@ function recalcularPxFrota(){
   return { motoristas, vinculados, naoVinculados: motoristas.filter(m=>!m.vinculado), notaMediaPx, notaMediaFrotaGeral, custoTotalDelta, litrosTotalDelta };
 }
 function processarCsvFalhas(texto){
-  const linhas = texto.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const linhas = linhasComCabecalho(texto);
   const delim = detectarDelimitador(linhas[0]);
   const header = linhas[0].split(delim).map(h=>h.replace(/^"|"$/g,''));
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
@@ -2088,7 +2228,11 @@ function bindImportacoes(){
   function processarConteudoTexto(texto, nomeArquivo){
     const agora = new Date().toLocaleString('pt-BR');
     const primeiraLinha = texto.split(/\r?\n/)[0];
-    const tipo = detectarTipoArquivo(primeiraLinha);
+    // usa a linha de cabeçalho de verdade (pula título/metadados no topo do
+    // arquivo, como no export de torre da planilha de Motoristas PX) pra
+    // detectar o tipo — a primeira linha crua pode estar em branco.
+    const linhasUteis = linhasComCabecalho(texto);
+    const tipo = detectarTipoArquivo(linhasUteis[0]||primeiraLinha);
     try{
       if(tipo==='autotrac'){
         const {novoDATA, log} = processarCsvAutotrac(texto);
@@ -2118,9 +2262,13 @@ function bindImportacoes(){
         HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Cadastro de veículos', registros:novos+' veículos ('+enriquecidos+' aplicados à frota atual)', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado:null});
       } else if(tipo==='px'){
         const {registros, periodoDetectado} = processarCsvPx(texto);
-        PX_MOTORISTAS = PX_MOTORISTAS.concat(registros);
+        // substitui a lista inteira — a planilha PX é sempre um retrato atual dos
+        // motoristas contratados, não um log que acumula entre importações (senão
+        // um motorista re-importado em duas sessões contaria em dobro na nota média).
+        PX_MOTORISTAS = registros;
+        salvarPxNoNavegador(PX_MOTORISTAS);
         PX_FROTA = recalcularPxFrota();
-        HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Motoristas PX', registros:registros.length+' motoristas', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado});
+        HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Motoristas PX', registros:registros.length+' motoristas (substituiu a lista anterior)', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado});
       } else {
         throw new Error('Não reconheci o tipo deste arquivo pelo cabeçalho: "'+primeiraLinha.slice(0,200)+'".');
       }
@@ -2264,6 +2412,16 @@ function renderCfgTab(tab){
           <button class="btn" id="cfgSalvarMeta" style="height:36px;">Salvar</button>
         </div>
       </div>
+      <div class="card">
+        <h3>Planilha de Motoristas PX</h3>
+        <div class="muted" style="margin-bottom:10px;">${PX_MOTORISTAS.length} motoristas carregados ${(()=>{ let d=null; try{d=localStorage.getItem('cordenonsi_px_atualizado_em');}catch(e){} return d?('· atualizada em '+d):'· planilha padrão embutida no sistema'; })()}</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn secondary" id="cfgAtualizarPxBtn" style="height:36px;">Atualizar planilha (.csv/.xlsx)</button>
+          <button class="btn ghost" id="cfgRestaurarPxBtn" style="height:36px;">Restaurar padrão</button>
+          <input type="file" id="cfgPxInput" accept=".csv,.xlsx,.xls" style="display:none;">
+        </div>
+        <p class="muted" style="margin-top:10px; font-size:11.5px;">A planilha nova substitui a lista inteira e fica salva neste navegador (não sincroniza entre computadores — sem back-end nesta versão). Mesmo formato usado em Importações: precisa de uma coluna "Motorista".</p>
+      </div>
     </div>`;
   }
   if(tab==='alertas'){
@@ -2286,6 +2444,44 @@ function bindCfgTabGeral(){
     const raw = document.getElementById('cfgMetaKml').value;
     META_KML_REFERENCIA = raw==='' ? null : parseFloat(raw);
     bm.innerHTML='✓ Salvo'; setTimeout(()=>{bm.innerHTML='Salvar';},1500);
+  });
+  const pxBtn = document.getElementById('cfgAtualizarPxBtn'), pxInput = document.getElementById('cfgPxInput'), pxRestaurar = document.getElementById('cfgRestaurarPxBtn');
+  if(pxBtn && pxInput) pxBtn.addEventListener('click', ()=>pxInput.click());
+  if(pxInput) pxInput.addEventListener('change', e=>{
+    const file = e.target.files[0]; if(!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    const aplicar = (texto)=>{
+      try{
+        const {registros} = processarCsvPx(texto);
+        PX_MOTORISTAS = registros;
+        salvarPxNoNavegador(PX_MOTORISTAS);
+        PX_FROTA = recalcularPxFrota();
+        render();
+      }catch(err){ alert('Falha ao processar a planilha de Motoristas PX: '+err.message); }
+    };
+    if(ext==='csv'){
+      const reader = new FileReader(); reader.onload=()=>aplicar(reader.result); reader.readAsText(file,'UTF-8');
+    } else if(ext==='xlsx' || ext==='xls'){
+      if(typeof XLSX==='undefined'){ alert('Biblioteca XLSX não carregou (sem conexão?). Tente novamente com internet, ou exporte a planilha como CSV.'); return; }
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        try{
+          const wb = XLSX.read(new Uint8Array(reader.result), {type:'array'});
+          const textoCsv = XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]], {FS:';'});
+          aplicar(textoCsv);
+        }catch(err){ alert('Falha ao ler a planilha XLSX: '+err.message); }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      alert('Formato não suportado — use CSV ou XLSX.');
+    }
+  });
+  if(pxRestaurar) pxRestaurar.addEventListener('click', ()=>{
+    if(!confirm('Restaurar a planilha padrão de Motoristas PX? Isso substitui a lista atual carregada neste navegador.')) return;
+    PX_MOTORISTAS = PX_MOTORISTAS_PADRAO.slice();
+    try{ localStorage.removeItem('cordenonsi_px_motoristas'); localStorage.removeItem('cordenonsi_px_atualizado_em'); }catch(e){}
+    PX_FROTA = recalcularPxFrota();
+    render();
   });
 }
 
@@ -2341,7 +2537,7 @@ function severidade4(classif){
   return 'excelente';
 }
 function processarCsvAutotrac(texto){
-  const linhas = texto.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const linhas = linhasComCabecalho(texto);
   const header = linhas[0].split(';');
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
   // essenciais de verdade (sempre presentes nas variantes já vistas)
@@ -2457,6 +2653,29 @@ function detectarDelimitador(linhaHeader){
   const virg = (linhaHeader.match(/,/g)||[]).length;
   return semic>=virg ? ';' : ',';
 }
+// Vários exports reais (ex.: relatórios de torre/TMS) trazem linhas de título,
+// filtros aplicados e metadados ANTES do cabeçalho de verdade — a primeira
+// linha do arquivo fica em branco ou com uma única célula de texto solto.
+// Pular direto pra linhas[0] nesses casos gerava um cabeçalho vazio
+// (";;;;;;;;;;;;" — foi exatamente o que quebrou o import da planilha de
+// Motoristas PX, cujo cabeçalho real só aparece na linha 15). Isso acha a
+// primeira linha que parece mesmo um cabeçalho de tabela (3+ células
+// preenchidas, cobrindo pelo menos 40% das colunas da linha) e descarta tudo
+// antes dela — se o arquivo já começa com o cabeçalho, o comportamento é
+// idêntico a antes (acha na primeira linha).
+function linhasComCabecalho(texto){
+  const brutas = texto.replace(/^﻿/,'').split(/\r?\n/);
+  let inicio = 0;
+  for(let i=0;i<Math.min(brutas.length,60);i++){
+    const l = brutas[i];
+    if(!l.trim()) continue;
+    const delim = detectarDelimitador(l);
+    const partes = l.split(delim).map(c=>c.replace(/^"|"$/g,'').trim());
+    const preenchidas = partes.filter(Boolean).length;
+    if(preenchidas>=3 && preenchidas/partes.length>=0.4){ inicio = i; break; }
+  }
+  return brutas.slice(inicio).filter(l=>l.trim().length);
+}
 function normalizarChave(s){ return s.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
 function acharColuna(idxMap, ...alvos){
   for(const alvo of alvos){
@@ -2467,7 +2686,7 @@ function acharColuna(idxMap, ...alvos){
 }
 
 function processarCsvAbastecimento(texto){
-  const linhas = texto.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const linhas = linhasComCabecalho(texto);
   const delim = detectarDelimitador(linhas[0]);
   const header = linhas[0].split(delim).map(h=>h.replace(/^"|"$/g,''));
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
@@ -2540,8 +2759,8 @@ function processarCsvAbastecimento(texto){
     if(g.segmento && !SEGMENTOS_OK.includes(g.segmento)) motivo='segmento fora ('+g.segmento+')';
     else if(g.km<=500) motivo='KM<=500';
     else if(media===null) motivo='média não calculável';
-    else if(media<1.5) motivo='média<1,50';
-    else if(media>5.0) motivo='média>5,00';
+    else if(media<KML_ELEGIVEL_MIN) motivo='média<1,50';
+    else if(media>KML_ELEGIVEL_MAX) motivo='média>5,00';
     auditoria.push({...g, media, elegivel:!motivo, motivo});
     if(!motivo){
       if(!elegiveisPorMes[g.mes]) elegiveisPorMes[g.mes]={km:0,litros:0};
@@ -2580,7 +2799,7 @@ function canonOperacao(raw){
   return raw.trim() ? raw.trim().replace(/\w\S*/g, t=>t[0].toUpperCase()+t.slice(1).toLowerCase()) : null;
 }
 function processarCsvCadastroVeiculos(texto){
-  const linhas = texto.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const linhas = linhasComCabecalho(texto);
   const delim = detectarDelimitador(linhas[0]);
   const header = linhas[0].split(delim).map(h=>h.replace(/^"|"$/g,''));
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
@@ -2642,7 +2861,7 @@ function faixaDe(pesoKg){ for(const [lo,hi,label] of FAIXAS_PESO_JS){ if(pesoKg>
 const CLIENTES_CONHECIDOS = ['NESTLE','MARTIN BROWER','BRF','MINERVA','MELI','MERCADO LIVRE'];
 
 function processarCsvCargas(texto){
-  const linhas = texto.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim().length);
+  const linhas = linhasComCabecalho(texto);
   const delim = detectarDelimitador(linhas[0]);
   const header = linhas[0].split(delim).map(h=>h.replace(/^"|"$/g,''));
   const idx = Object.fromEntries(header.map((h,i)=>[h.trim(),i]));
@@ -2840,6 +3059,7 @@ function render(){
   c.insertAdjacentHTML('afterbegin', printHeaderHtml());
 }
 
+PX_FROTA = recalcularPxFrota();
 render();
 </script>
 </body>
