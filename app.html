@@ -615,7 +615,9 @@ function radarChart(axes, size=260){
 }
 
 function renderNav(){
-  const critCount = veiculosAtuais().filter(v=>v.severidade==='critico').length;
+  // mesmo critério da tabela de Ofensores (n_precisa_melhorar>0) — antes usava
+  // o campo severidade importado, que podia divergir do que a página mostrava.
+  const critCount = veiculosAtuais().filter(v=>v.n_precisa_melhorar>0).length;
   let html='', lastGroup=null;
   NAV.forEach(item=>{
     if(item.group!==lastGroup){ html+=`<div class="nav-sep">${item.group}</div>`; lastGroup=item.group; }
@@ -949,6 +951,104 @@ function abrirImpactoModal(tipo){
       <div class="muted" style="margin-bottom:14px;">${lista.length} veículo(s)${opFiltro?' · '+opFiltro:''} · a média de comparação é sempre da operação inteira (frota própria) · clique numa placa pra abrir o detalhe</div>
       <div class="table-scroll"><table><thead><tr><th>Placa</th><th>Operação</th><th class="num">Km</th><th class="num">km/L</th><th class="num">Média op.</th>${tipo==='abaixo'?'<th class="num">Litros a mais</th>':''}</tr></thead>
       <tbody>${lista.map(v=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="placa">${v.placa}</td><td>${v.operacao}</td><td class="num">${fmtInt(v.km)}</td><td class="num">${fmtNum(v.kml)}</td><td class="num muted">${fmtNum(v.mediaOp)}</td>${tipo==='abaixo'?`<td class="num" style="color:var(--red);"><b>+${fmtInt(v.gap)} L</b></td>`:''}</tr>`).join('')}</tbody></table></div>
+    </div>`;
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  overlay.querySelector('.close').addEventListener('click', ()=>overlay.remove());
+  document.body.appendChild(overlay);
+}
+
+/* =========================================================================
+   ANÁLISE PADRÃO DE OFENSOR (Ofensores > Ação > Ver)
+   Método fixo, sempre nesta ordem, sempre a partir de dado real já na tela
+   (nunca gera número novo, só cruza o que já existe):
+   1) Diagnóstico — quais dos 6 indicadores estão em "Atenção"/"Precisa
+      melhorar" pras faixas oficiais (mesmas classificarX() do resto do app).
+   2) Comparação com a operação — nota e km/L do veículo vs a média da
+      própria operação (mesma referência usada em Impacto Financeiro).
+   3) Comparação com a rota — só quando há Cargas importadas nesta sessão
+      pra essa placa: identifica a rota mais frequente dela e compara seu
+      km/L com o de outros veículos que rodaram a mesma rota. Sem Cargas
+      importadas, diz isso explicitamente — nunca inventa uma rota.
+   4) Recomendação — uma ação prática por indicador problemático, de um
+      dicionário fixo (mesmo texto sempre pro mesmo indicador, sem variação
+      aleatória) — o "método padrão" pedido.
+   ========================================================================= */
+const RECOMENDACAO_POR_INDICADOR = {
+  velocidade: 'Reduzir excesso de velocidade: reforçar uso do roteirizador com limite de via configurado, revisar com o motorista os trechos onde os picos de velocidade aconteceram nesta semana.',
+  frenagem: 'Trabalhar antecipação de frenagem: reforçar distância segura do veículo à frente e leitura antecipada do trânsito — frenagem brusca recorrente costuma indicar falta de antecipação, não só velocidade.',
+  aceleracao: 'Reduzir acelerações bruscas: orientar arrancadas progressivas, principalmente saindo de paradas, pedágios e cruzamentos — impacta direto o consumo de combustível.',
+  marcha_lenta: 'Reduzir tempo em marcha lenta: orientar desligar o motor em paradas longas (carga/descarga, refeição, pernoite) em vez de deixar o veículo ligado parado.',
+  rpm: 'Revisar padrão de troca de marchas: RPM elevado fora da faixa ideal costuma indicar marcha errada pro relevo/peso da carga — reforçar troca antecipada de marcha.',
+  faixa_verde: 'Aumentar o tempo na faixa verde de rotação do motor: é o indicador com maior impacto direto no consumo — reforçar o treinamento de condução econômica focado nisso.',
+};
+function analisarOfensor(placa){
+  const v = DATA.veiculos.find(x=>x.placa===placa);
+  if(!v) return null;
+  const nota = calcularNota(v);
+  const indicadores = [
+    {chave:'faixa_verde', lbl:'Faixa verde', cls: classificarFaixaVerde(v.faixa_verde)},
+    {chave:'rpm', lbl:'RPM elevado', cls: classificarRpm(v.rpm)},
+    {chave:'frenagem', lbl:'Frenagens bruscas', cls: classificarFrenAcel(v.frenagem,[0.03,0.07,0.12])},
+    {chave:'aceleracao', lbl:'Acelerações bruscas', cls: classificarFrenAcel(v.aceleracao,[0.02,0.05,0.10])},
+    {chave:'velocidade', lbl:'Excesso de velocidade', cls: classificarVelocidade(v.velocidade)},
+    {chave:'marcha_lenta', lbl:'Marcha lenta', cls: classificarMarchaLenta(v.marcha_lenta)},
+  ];
+  const problemas = indicadores.filter(i=>i.cls==='Precisa melhorar')
+    .concat(indicadores.filter(i=>i.cls==='Atenção'));
+
+  const medias = mediaKmlPorOperacao();
+  const mediaOp = medias[v.operacao] || null;
+  const notasOp = DATA.veiculos.filter(x=>x.operacao===v.operacao).map(calcularNota).filter(n=>n!==null);
+  const notaMediaOp = notasOp.length ? notasOp.reduce((a,b)=>a+b,0)/notasOp.length : null;
+
+  let comparacaoRota = null;
+  const cargasDaPlaca = CARGAS_ACUMULADAS.filter(c=>c.placa===placa && !c.vazio);
+  if(cargasDaPlaca.length){
+    const contagem = {};
+    cargasDaPlaca.forEach(c=>{ const r=c.origem+' → '+c.destino; contagem[r]=(contagem[r]||0)+1; });
+    const [rota, nCargas] = Object.entries(contagem).sort((a,b)=>b[1]-a[1])[0];
+    const outrasPlacas = [...new Set(CARGAS_ACUMULADAS.filter(c=>(c.origem+' → '+c.destino)===rota && !c.vazio && c.placa && c.placa!==placa).map(c=>c.placa))];
+    const kmlsOutras = outrasPlacas.map(p=>{ const vv=DATA.veiculos.find(x=>x.placa===p); return vv&&vv.estimativa_kml? vv.estimativa_kml : null; }).filter(x=>x!==null);
+    const mediaRota = kmlsOutras.length ? kmlsOutras.reduce((a,b)=>a+b,0)/kmlsOutras.length : null;
+    comparacaoRota = {rota, nCargas, outrosMotoristas:kmlsOutras.length, mediaRota, kmlPlaca:v.estimativa_kml};
+  }
+  return {v, nota, problemas, mediaOp, notaMediaOp, comparacaoRota};
+}
+function abrirAnaliseOfensor(placa){
+  const a = analisarOfensor(placa);
+  if(!a) return;
+  const {v, nota, problemas, mediaOp, notaMediaOp, comparacaoRota} = a;
+  const overlay = el(`<div class="modal-overlay"></div>`);
+  const diagnosticoHtml = problemas.length
+    ? `<ul style="margin:0; padding-left:18px; font-size:13px; line-height:1.9;">${problemas.map(p=>`<li><b>${p.lbl}</b> — <span class="pill dot ${p.cls==='Precisa melhorar'?'critico':'atencao'}" style="margin-left:2px;">${p.cls}</span></li>`).join('')}</ul>`
+    : `<p style="font-size:13px; color:var(--green);">Nenhum indicador em Atenção/Precisa melhorar nesta semana.</p>`;
+  const compOpHtml = `<p style="font-size:13px; line-height:1.7;">
+    Nota de condução: <b>${nota??'—'}</b> ${notaMediaOp!==null?`vs média da operação <b>${Math.round(notaMediaOp)}</b> (${nota!==null&&notaMediaOp!==null?(nota>=notaMediaOp?'<span style="color:var(--green)">acima</span>':'<span style="color:var(--red)">abaixo</span>'):''} da operação)`:'— sem nota média da operação pra comparar'}<br>
+    km/L: <b>${v.estimativa_kml!==null?fmtNum(v.estimativa_kml):'—'}</b> ${mediaOp!==null?`vs média da operação <b>${fmtNum(mediaOp)}</b>`:'— sem média de km/L da operação pra comparar (importe o Abastecimento)'}
+  </p>`;
+  const compRotaHtml = comparacaoRota
+    ? `<p style="font-size:13px; line-height:1.7;">Rota mais frequente desta placa: <b>${comparacaoRota.rota}</b> (${comparacaoRota.nCargas} carga(s) no período importado de Cargas).<br>
+      ${comparacaoRota.outrosMotoristas ? `Comparado a <b>${comparacaoRota.outrosMotoristas}</b> outro(s) veículo(s) que também rodaram essa rota: km/L desta placa <b>${comparacaoRota.kmlPlaca!==null?fmtNum(comparacaoRota.kmlPlaca):'—'}</b> vs média dos outros <b>${comparacaoRota.mediaRota!==null?fmtNum(comparacaoRota.mediaRota):'—'}</b>${comparacaoRota.kmlPlaca!==null&&comparacaoRota.mediaRota!==null?(comparacaoRota.kmlPlaca<comparacaoRota.mediaRota?' <span style="color:var(--red)">(abaixo dos outros motoristas da mesma rota)</span>':' <span style="color:var(--green)">(dentro ou acima dos outros motoristas da mesma rota)</span>'):''}.`
+      : 'Nenhum outro veículo com carga registrada nesta rota no período importado, pra comparar.'}
+      </p>`
+    : `<p class="muted" style="font-size:13px;">Sem relatório de Cargas importado pra esta placa nesta sessão — não dá pra comparar com a rota nem com outros motoristas dela. Importe Cargas em Importações pra completar esta análise.</p>`;
+  const recomendacaoHtml = problemas.length
+    ? `<ul style="margin:0; padding-left:18px; font-size:13px; line-height:1.9;">${[...new Set(problemas.map(p=>p.chave))].map(chave=>`<li>${RECOMENDACAO_POR_INDICADOR[chave]}</li>`).join('')}</ul>`
+    : `<p style="font-size:13px;">Sem indicador crítico — manter o padrão atual e monitorar.</p>`;
+  overlay.innerHTML = `
+    <div class="modal-box" style="width:min(640px,94vw);">
+      <span class="close">&times;</span>
+      <h3 style="margin:0 0 2px;">Análise — ${v.placa}</h3>
+      <div class="muted" style="margin-bottom:16px;">${v.operacao}${v.motorista?' · '+v.motorista:''} · método padrão: diagnóstico → comparação com a operação → comparação com a rota → recomendação</div>
+      <h4 style="margin:0 0 6px; font-size:12.5px; text-transform:uppercase; color:var(--muted); letter-spacing:.03em;">1. Diagnóstico</h4>
+      ${diagnosticoHtml}
+      <h4 style="margin:16px 0 6px; font-size:12.5px; text-transform:uppercase; color:var(--muted); letter-spacing:.03em;">2. Comparação com a operação</h4>
+      ${compOpHtml}
+      <h4 style="margin:16px 0 6px; font-size:12.5px; text-transform:uppercase; color:var(--muted); letter-spacing:.03em;">3. Comparação com a rota</h4>
+      ${compRotaHtml}
+      <h4 style="margin:16px 0 6px; font-size:12.5px; text-transform:uppercase; color:var(--muted); letter-spacing:.03em;">4. Recomendação</h4>
+      ${recomendacaoHtml}
+      <button class="btn secondary" style="margin-top:16px;" onclick="openVeiculoDetail('${v.placa}')">Ver painel completo da placa</button>
     </div>`;
   overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
   overlay.querySelector('.close').addEventListener('click', ()=>overlay.remove());
@@ -1543,11 +1643,25 @@ function viewTelemetria(){
       </div>
     </div>
     <div class="card">
-      <h3>Placas com Mais Eventos Críticos</h3>
-      <div class="card-sub">ordenado por quantidade de indicadores em "Precisa melhorar" — não é um log individual por evento (a Autotrac não exporta horário/local por evento), mas reflete quem mais gerou alerta na seleção atual</div>
-      ${DATA.ranking_piores.length ? `<table><thead><tr><th>#</th><th>Placa</th><th>Operação</th><th class="num">Indicadores críticos</th><th>Principal alerta</th></tr></thead>
-        <tbody>${DATA.ranking_piores.slice(0,10).map((v,i)=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="muted">${i+1}º</td><td class="placa">${v.placa}</td><td>${v.operacao}</td><td class="num"><span class="pill critico">${v.n_precisa_melhorar}</span></td><td>${v.ponto_atencao}</td></tr>`).join('')}</tbody></table>`
-        : emptyState('telemetria','Sem ofensores nesta seleção','Nenhum veículo com indicador crítico no período/operação selecionados.')}
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+        <div><h3 style="margin-bottom:2px;">Placas — ${(viewTelemetria._modo||'piores')==='piores'?'Mais Eventos Críticos':'Melhor Desempenho'}</h3>
+        <div class="card-sub">${(viewTelemetria._modo||'piores')==='piores'?'ordenado por quantidade de indicadores em "Precisa melhorar"':'ordenado por quantidade de indicadores "Muito bom"/"Bom" — zero em "Precisa melhorar" primeiro'} · não é um log individual por evento (a Autotrac não exporta horário/local por evento), reflete a seleção atual (${opFiltro||'todas as operações'})</div></div>
+        <div class="tabs" id="telModoTabs" style="border-bottom:none; margin-bottom:0;">
+          <div class="tab ${(viewTelemetria._modo||'piores')==='piores'?'active':''}" data-modo="piores">Piores</div>
+          <div class="tab ${viewTelemetria._modo==='melhores'?'active':''}" data-modo="melhores">Melhores</div>
+        </div>
+      </div>
+      ${(()=>{
+        const modo = viewTelemetria._modo||'piores';
+        const comIndicador = vs.filter(v=>v.n_precisa_melhorar!==undefined && v.n_precisa_melhorar!==null);
+        const ordenado = comIndicador.slice().sort((a,b)=> modo==='piores'
+          ? (b.n_precisa_melhorar-a.n_precisa_melhorar) || ((b.n_atencao||0)-(a.n_atencao||0))
+          : (a.n_precisa_melhorar-b.n_precisa_melhorar) || ((a.n_atencao||0)-(b.n_atencao||0)));
+        const top10 = ordenado.slice(0,10);
+        return top10.length ? `<div class="table-scroll"><table><thead><tr><th>#</th><th>Placa</th><th>Operação</th><th class="num">Indicadores críticos</th><th>${modo==='piores'?'Principal alerta':'Destaque'}</th></tr></thead>
+          <tbody>${top10.map((v,i)=>`<tr onclick="openVeiculoDetail('${v.placa}')"><td class="muted">${i+1}º</td><td class="placa">${v.placa}</td><td>${v.operacao}</td><td class="num"><span class="pill ${v.n_precisa_melhorar>0?'critico':'excelente'}">${v.n_precisa_melhorar}</span></td><td>${(modo==='piores'?v.ponto_atencao:v.destaque)||'—'}</td></tr>`).join('')}</tbody></table></div>`
+          : emptyState('telemetria','Sem veículos nesta seleção','Nenhum veículo com indicador calculável no período/operação selecionados.');
+      })()}
     </div>
   `;
 }
@@ -1771,13 +1885,20 @@ function renderOfTab(tab){
     return `<div class="table-wrap"><div class="table-scroll"><table><thead><tr><th>Operação</th><th class="num">Críticos</th><th class="num">Total</th></tr></thead>
       <tbody>${rows.map(([n,o])=>`<tr><td>${n}</td><td class="num"><span class="pill critico">${o.critico}</span></td><td class="num muted">${o.total}</td></tr>`).join('')}</tbody></table></div></div>`;
   }
-  const ranking = DATA.ranking_piores;
+  // Recalculado a partir de veiculosAtuais() (respeita o filtro de operação do
+  // topo) em vez de ler DATA.ranking_piores direto — esse era um top-N fixo,
+  // não filtrava por operação selecionada.
+  OFENSORES_RANKING_ATUAL = veiculosAtuais().filter(v=>v.n_precisa_melhorar>0).sort((a,b)=>b.n_precisa_melhorar-a.n_precisa_melhorar);
+  const ranking = OFENSORES_RANKING_ATUAL;
   const impacto = calcularImpactoFinanceiro();
+  PAGINA.ofensores = 1;
   return `
     <div class="table-wrap" style="margin-bottom:20px;"><div class="table-scroll"><table>
       <thead><tr><th>#</th><th>Placa</th><th>Operação</th><th>Indicador</th><th class="num">Gap</th><th>Ação</th></tr></thead>
-      <tbody>${ranking.map((v,i)=>`<tr><td class="muted">${i+1}º</td><td class="placa">${v.placa}</td><td>${v.operacao}</td><td><span class="pill critico">${v.n_precisa_melhorar} críticos</span></td><td class="num">${v.ponto_atencao}</td><td><button class="btn ghost" style="height:30px;padding:0 12px;" onclick="openVeiculoDetail('${v.placa}')">Ver</button></td></tr>`).join('')}</tbody>
-    </table></div></div>
+      <tbody id="ofBody"></tbody>
+    </table></div>
+    <div class="table-foot" id="ofPagWrap"></div>
+    </div>
     <div class="card">
       <h3>Recomendação de Ação</h3>
       ${ranking[0]?`
@@ -1788,6 +1909,13 @@ function renderOfTab(tab){
     </div>
   `;
 }
+function renderOfensoresBody(){
+  const body = document.getElementById('ofBody'), pagWrap = document.getElementById('ofPagWrap');
+  if(!body) return;
+  const {pagina, totalPaginas} = paginar(OFENSORES_RANKING_ATUAL, 'ofensores', 25);
+  body.innerHTML = pagina.map((v,i)=>`<tr><td class="muted">${(PAGINA.ofensores-1)*25+i+1}º</td><td class="placa">${v.placa}</td><td>${v.operacao}</td><td><span class="pill critico">${v.n_precisa_melhorar} críticos</span></td><td class="num">${v.ponto_atencao}</td><td><button class="btn ghost" style="height:30px;padding:0 12px;" onclick="abrirAnaliseOfensor('${v.placa}')">Ver</button></td></tr>`).join('');
+  if(pagWrap){ pagWrap.innerHTML = `${OFENSORES_RANKING_ATUAL.length} veículo(s) com pelo menos um indicador crítico ${paginacaoHtml('ofensores', totalPaginas)}`; bindPaginacao(pagWrap, renderOfensoresBody); }
+}
 
 /* =========================================================================
    10 PX x FROTA (vazio)
@@ -1795,11 +1923,30 @@ function renderOfTab(tab){
 function renderBenchTable(){
   const lista = BENCHMARK_ROTAS.slice().sort((a,b)=>b.amostras-a.amostras);
   const {pagina, totalPaginas} = paginar(lista, 'bench', 20);
-  document.getElementById('benchBody').innerHTML = pagina.map(b=>`
-    <tr><td>${b.rota}</td><td>${b.faixa_peso}</td><td class="num">${b.amostras}</td><td class="num"><b>${fmtNum(b.media_kml)}</b></td>
+  document.getElementById('benchBody').innerHTML = pagina.map((b,i)=>`
+    <tr style="cursor:pointer;" onclick="abrirBenchDetalhe('${b.rota.replace(/'/g,"\\'")}','${b.faixa_peso}')"><td>${b.rota}</td><td>${b.faixa_peso}</td><td class="num">${b.amostras}</td><td class="num"><b>${fmtNum(b.media_kml)}</b></td>
     <td><span class="pill ${b.confianca==='Forte'?'excelente':(b.confianca==='Moderada'?'bom':'atencao')}">${b.confianca}</span></td></tr>`).join('');
-  document.getElementById('benchCount').innerHTML = `${lista.length} combinações rota+peso ${paginacaoHtml('bench', totalPaginas)}`;
+  document.getElementById('benchCount').innerHTML = `${lista.length} combinações rota+peso · clique numa linha pra ver o detalhe ${paginacaoHtml('bench', totalPaginas)}`;
   bindPaginacao(document.getElementById('benchCount'), renderBenchTable);
+}
+function abrirBenchDetalhe(rota, faixa){
+  const b = BENCHMARK_ROTAS.find(x=>x.rota===rota && x.faixa_peso===faixa);
+  if(!b) return;
+  const overlay = el(`<div class="modal-overlay"></div>`);
+  const detalhe = b.amostrasDetalhe;
+  overlay.innerHTML = `
+    <div class="modal-box" style="width:min(640px,94vw);">
+      <span class="close">&times;</span>
+      <h3 style="margin:0 0 2px;">${rota}</h3>
+      <div class="muted" style="margin-bottom:14px;">Faixa de peso: ${faixa} · ${b.amostras} amostra(s) · média ${fmtNum(b.media_kml)} km/L · confiança ${b.confianca}</div>
+      ${detalhe ? `
+        <div class="table-scroll"><table><thead><tr><th>Data</th><th>Placa</th><th class="num">Peso (kg)</th><th class="num">km/L do mês</th></tr></thead>
+        <tbody>${detalhe.slice().sort((a,b2)=>b2.kml-a.kml).map(a=>`<tr onclick="openVeiculoDetail('${a.placa}')" style="cursor:pointer;"><td class="muted">${a.data||'—'}</td><td class="placa">${a.placa}</td><td class="num">${fmtInt(a.peso)}</td><td class="num"><b>${fmtNum(a.kml)}</b></td></tr>`).join('')}</tbody></table></div>
+      ` : `<p class="muted">Esta combinação rota + faixa de peso veio do processamento original (janeiro–agosto), que guardou só os números já agregados — não manteve o registro individual por viagem, então não há detalhamento por placa/data pra abrir aqui. Importe o relatório de Cargas de um novo período em Importações: o benchmark recalculado na sessão já guarda cada viagem e passa a abrir o detalhe normalmente.</p>`}
+    </div>`;
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  overlay.querySelector('.close').addEventListener('click', ()=>overlay.remove());
+  document.body.appendChild(overlay);
 }
 function viewPx(){
   if(!PX_MOTORISTAS.length){
@@ -2054,6 +2201,7 @@ let ABASTECIMENTO = null; // {evolucao, mediaOficialGeral, log} — independente
 let ABASTECIMENTO_POR_PLACA = {}; // placa -> [{data,litros,km_total}] — alimenta a aba Abastecimento do veículo
 let FALHAS_POR_PLACA = {}; // placa -> [{data,descricao}] — alimenta a aba Manutenção do veículo
 let FALHAS_ATUAIS = []; // lista de falhas renderizada agora na aba Manutenção — referência p/ o modal de detalhe
+let OFENSORES_RANKING_ATUAL = []; // lista completa (não só top-N) calculada por renderOfTab — paginada por renderOfensoresBody
 // Planilha real de Motoristas PX (export de torre/TMS) enviada em 22/09/2026 —
 // embutida como padrão pra não depender de reimportar toda sessão. Atualizável
 // em Configurações > Planilha de Motoristas PX (substitui e persiste via
@@ -2243,6 +2391,13 @@ function bindImportacoes(){
         const res = processarCsvAbastecimento(texto);
         ABASTECIMENTO = res;
         res.auditoria.forEach(a=>{ if(a.elegivel) KML_POR_PLACA_MES[a.placa+'|'+a.mes.slice(5)] = a.media; });
+        // Se Cargas já tinha sido importado antes do Abastecimento (ordem natural de
+        // upload), o benchmark rota×peso não tinha KML_POR_PLACA_MES ainda pra cruzar
+        // e ficava vazio pra sempre — recalcula de novo agora que o km/L está disponível.
+        if(CARGAS_ACUMULADAS.length){
+          const resumo = recalcularRotasEBenchmarkDaSessao();
+          if(resumo.benchSessao.length) BENCHMARK_ROTAS = resumo.benchSessao;
+        }
         HISTORICO_IMPORTACOES.unshift({arquivo:nomeArquivo, tipo:'Abastecimento', registros:res.log.elegiveis+' elegíveis / '+res.log.descartados+' descartados', status:'Processado', statusClass:'excelente', data:agora, periodoDetectado:res.periodoDetectado});
       } else if(tipo==='falhas'){
         const {n, periodoDetectado} = processarCsvFalhas(texto);
@@ -2883,7 +3038,7 @@ function processarCsvCargas(texto){
     const motorista = cMotorista!==undefined? (r[cMotorista]||'').trim() : '';
     const dataCarga = cData!==undefined?r[cData]:'';
     const mMes = (dataCarga.match(/^(\d{2})\/(\d{2})\/(\d{4})/)||[])[2];
-    registros.push({origem,destino,peso,vazio,placa,motorista,mes:mMes,tipo});
+    registros.push({origem,destino,peso,vazio,placa,motorista,mes:mMes,tipo,data:(dataCarga||'').trim()});
   }
   CARGAS_ACUMULADAS = CARGAS_ACUMULADAS.concat(registros);
   return registros;
@@ -2907,19 +3062,26 @@ function recalcularRotasEBenchmarkDaSessao(){
     peso_medio: r.carregado? Math.round(r.pesoTotal/r.carregado) : null, veiculos_unicos:r.placas.size,
   })).sort((a,b)=>b.cargas-a.cargas);
 
+  // amostrasDetalhe guarda o registro por viagem (placa/data/peso/km-L do mês) —
+  // só existe pro benchmark recalculado NESTA sessão (a partir do que foi
+  // importado em Cargas + Abastecimento). O benchmark original embutido no
+  // build (jan–ago) só trouxe os números já agregados, sem manter o registro
+  // individual por viagem — não dá pra "abrir" detalhe que nunca foi guardado,
+  // então esses continuam sem drill-down (ver renderBenchTable/abrirBenchDetalhe).
   const bench = {};
   CARGAS_ACUMULADAS.forEach(c=>{
     if(c.vazio || !c.peso || c.peso<=1 || !c.placa || !c.mes) return;
     const kml = KML_POR_PLACA_MES[c.placa+'|'+c.mes];
     if(kml===undefined) return;
     const key = (c.origem+' → '+c.destino)+'|'+faixaDe(c.peso);
-    (bench[key] = bench[key]||[]).push(kml);
+    (bench[key] = bench[key]||[]).push({placa:c.placa, data:c.data||null, peso:c.peso, kml});
   });
-  const benchSessao = Object.entries(bench).filter(([,v])=>v.length>=3).map(([key,valores])=>{
+  const benchSessao = Object.entries(bench).filter(([,v])=>v.length>=3).map(([key,amostrasDetalhe])=>{
     const [rota,faixa] = key.split('|');
+    const valores = amostrasDetalhe.map(a=>a.kml);
     const media = valores.reduce((a,b)=>a+b,0)/valores.length;
     const confianca = valores.length>=10?'Forte':(valores.length>=5?'Moderada':'Fraca');
-    return {rota, faixa_peso:faixa, amostras:valores.length, media_kml:Math.round(media*100)/100, confianca};
+    return {rota, faixa_peso:faixa, amostras:valores.length, media_kml:Math.round(media*100)/100, confianca, amostrasDetalhe};
   }).sort((a,b)=>b.amostras-a.amostras);
 
   return { total_cargas: CARGAS_ACUMULADAS.length, top_rotas: topRotas, faixas_peso: faixas, clientes, benchSessao };
@@ -3023,7 +3185,11 @@ function render(){
       break;
     }
     case 'rotas': { c.innerHTML = viewRotas(); renderBenchTable(); break; }
-    case 'telemetria': c.innerHTML = viewTelemetria(); break;
+    case 'telemetria': {
+      c.innerHTML = viewTelemetria();
+      document.querySelectorAll('#telModoTabs .tab').forEach(t=>t.addEventListener('click', ()=>{ viewTelemetria._modo=t.dataset.modo; render(); }));
+      break;
+    }
     case 'combustivel': c.innerHTML = viewCombustivel(); break;
     case 'ranking': {
       c.innerHTML = viewRanking();
@@ -3035,6 +3201,7 @@ function render(){
     case 'ofensores': {
       c.innerHTML = viewOfensores();
       document.querySelectorAll('#ofTabs .tab').forEach(t=>t.addEventListener('click', ()=>{ viewOfensores._tab=t.dataset.tab; render(); }));
+      if(document.getElementById('ofBody')) renderOfensoresBody();
       break;
     }
     case 'px': c.innerHTML = viewPx(); break;
