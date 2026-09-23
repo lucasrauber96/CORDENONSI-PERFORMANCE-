@@ -128,7 +128,7 @@ svg{display:block;}
 .kpi.ok .ico{background:var(--green-bg); color:var(--green);}
 .kpi .body{min-width:0; flex:1;}
 .kpi .lbl{font-size:11.5px; color:var(--muted); font-weight:600;}
-.kpi .num{font-size:22px; font-weight:800; letter-spacing:-0.02em; line-height:1.3;}
+.kpi .num{font-size:22px; font-weight:800; letter-spacing:-0.02em; line-height:1.3; overflow-wrap:break-word; word-break:break-word;}
 .kpi .delta{font-size:10.5px; font-weight:700; color:var(--muted-2); display:flex; align-items:center; gap:3px;}
 .kpi .delta.up{color:var(--green);} .kpi .delta.down{color:var(--red);}
 
@@ -486,7 +486,9 @@ function pontosVelocidade(v){ if(v===null) return null; if(v===0)return 25; if(v
 function pontosFrenAcel(v){ if(v===null) return null; if(v===0)return 20; if(v<=0.2)return 17; if(v<=0.5)return 14; if(v<=1)return 10; if(v<=2)return 6; return 2; }
 function pontosRpm(v){ if(v===null) return null; if(v===0)return 15; if(v<=0.2)return 13; if(v<=0.5)return 10; if(v<=1)return 7; if(v<=2)return 4; return 1; }
 function pontosMarchaLenta(v){ if(v===null) return null; if(v<=1)return 10; if(v<=2)return 8; if(v<=3)return 6; if(v<=5)return 4; if(v<=8)return 2; return 1; }
-function pontosFaixaVerde(v){ if(v===null) return null; if(v>=95)return 10; if(v>=90)return 8; if(v>=85)return 6; if(v>=80)return 4; if(v>=75)return 2; return 1; }
+// Padrão fixado: >95% (95,00% exatos NÃO entram aqui) = 10 · 90–95% inclusive = 8 ·
+// 85–<90% = 6 · 80–<85% = 4 · 75–<80% = 2 · <75% = 1.
+function pontosFaixaVerde(v){ if(v===null) return null; if(v>95)return 10; if(v>=90)return 8; if(v>=85)return 6; if(v>=80)return 4; if(v>=75)return 2; return 1; }
 function calcularNota(v){
   const p=[pontosVelocidade(v.velocidade),pontosFrenAcel(v.frenagem),pontosFrenAcel(v.aceleracao),pontosRpm(v.rpm),pontosMarchaLenta(v.marcha_lenta),pontosFaixaVerde(v.faixa_verde)];
   if(p.some(x=>x===null)) return null;
@@ -1115,28 +1117,36 @@ function viewVisaoGeral(){
         <div id="opsListVisao">${opsList()}</div>
       </div>
       <div class="card">
-        <h3>Mapa de Operações</h3>
-        <div class="card-sub">agrupamento regional aproximado — sem coordenadas de rota reais ainda</div>
-        ${mapaOperacoes()}
-      </div>
-    </div>
-
-    <div class="grid g2" style="align-items:start;">
-      <div class="card" id="top5Card">${top5OfensoresHtml('combustivel')}</div>
-      <div class="card">
         <h3>Impacto Financeiro Estimado</h3>
-        <div class="card-sub">metodologia fixa: média km/L de cada operação → veículos abaixo dela → gap em litros × R$ ${fmtNum(DIESEL_PRECO_ASSUMIDO,2)}/L assumido</div>
+        <div class="card-sub">metodologia fixa: média km/L de cada operação (ou geral, se "Todas as operações") → veículos abaixo dela → gap em litros × R$ ${fmtNum(DIESEL_PRECO_ASSUMIDO,2)}/L assumido · clique numa barra pra ver os veículos</div>
         ${impacto ? `
           <div class="num" style="font-size:30px; color:var(--red); margin-bottom:4px;">${fmtMoney(impacto.valorEstimado)}</div>
-          <div class="muted" style="margin-bottom:14px;">
-            <a href="javascript:void(0)" onclick="abrirImpactoModal('abaixo')" style="color:var(--red); font-weight:700; text-decoration:underline;">${impacto.veiculosAbaixo} veículos abaixo da média</a> da própria operação · ${fmtInt(impacto.litrosExtras)} L acima do esperado ·
-            <a href="javascript:void(0)" onclick="abrirImpactoModal('esperado')" style="color:var(--brand); font-weight:700; text-decoration:underline;">${impacto.listaEsperado.length} dentro do esperado</a>
-          </div>
-          ${groupedBar(['Consumo'],[impacto.consumoReal],[impacto.consumoEsperado],'Real (L)','Esperado (L)')}
+          <div class="muted" style="margin-bottom:14px;">${impacto.veiculosAbaixo} veículos abaixo da média da própria operação · ${fmtInt(impacto.litrosExtras)} L acima do esperado</div>
+          ${barraImpactoSvg(impacto.listaEsperado.length, impacto.veiculosAbaixo)}
         ` : `<div class="empty" style="padding:20px;"><p>Sem litros suficientes na telemetria para estimar — importe o abastecimento para o cálculo oficial.</p></div>`}
       </div>
     </div>
+
+    <div class="card" id="top5Card">${top5OfensoresHtml('combustivel')}</div>
   `;
+}
+// Duas barras clicáveis: "Média da operação" (veículos na média/acima, azul) e
+// "Veículos abaixo da média" (vermelho) — clique em qualquer uma abre a lista
+// real por trás do número (mesmo modal de abrirImpactoModal).
+function barraImpactoSvg(qtdMedia, qtdAbaixo){
+  const w=340, h=210, pad=38, barW=92;
+  const max = Math.max(qtdMedia, qtdAbaixo, 1);
+  const x1 = pad+16, x2 = w-pad-16-barW;
+  const h1 = Math.max(2,(qtdMedia/max)*(h-2*pad-24)), h2 = Math.max(2,(qtdAbaixo/max)*(h-2*pad-24));
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}">
+    <line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="var(--line-2)"/>
+    <rect x="${x1}" y="${h-pad-h1}" width="${barW}" height="${h1}" rx="5" fill="var(--brand)" style="cursor:pointer;" onclick="abrirImpactoModal('esperado')"><title>Média da operação — clique para ver os veículos</title></rect>
+    <text x="${x1+barW/2}" y="${h-pad-h1-8}" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)" font-family="Montserrat">${qtdMedia}</text>
+    <text x="${x1+barW/2}" y="${h-pad+18}" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="Montserrat">Média da operação</text>
+    <rect x="${x2}" y="${h-pad-h2}" width="${barW}" height="${h2}" rx="5" fill="var(--red)" style="cursor:pointer;" onclick="abrirImpactoModal('abaixo')"><title>Veículos abaixo da média — clique para ver os veículos</title></rect>
+    <text x="${x2+barW/2}" y="${h-pad-h2-8}" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)" font-family="Montserrat">${qtdAbaixo}</text>
+    <text x="${x2+barW/2}" y="${h-pad+18}" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="Montserrat">Veículos abaixo da média</text>
+  </svg>`;
 }
 
 function mapaOperacoes(){
@@ -1260,7 +1270,7 @@ function renderOpTabContent(veic, o){
     const mFx=media('faixa_verde'), mRpm=media('rpm'), mFren=media('frenagem'), mAcel=media('aceleracao'), mVel=media('velocidade'), mMarcha=media('marcha_lenta');
     const indicadores = [
       {ico:'drops', lbl:'Faixa verde (média)', val: mFx!==null?fmtPct(mFx)+'%':'—', cls: classificarFaixaVerde(mFx)},
-      {ico:'telemetria', lbl:'RPM elevado (média)', val: mRpm!==null?fmtPct(mRpm,2)+'%':'—', cls: classificarRpm(mRpm)},
+      {ico:'telemetria', lbl:'RPM elevado (média)', val: mRpm!==null?fmtPct(mRpm,2)+'% do tempo em movimento':'—', cls: classificarRpm(mRpm)},
       {ico:'ofensores', lbl:'Frenagens bruscas (média)', val: mFren!==null?fmtNum(mFren)+' /100km':'—', cls: classificarFrenAcel(mFren,[0.03,0.07,0.12])},
       {ico:'veiculos', lbl:'Acelerações bruscas (média)', val: mAcel!==null?fmtNum(mAcel)+' /100km':'—', cls: classificarFrenAcel(mAcel,[0.02,0.05,0.10])},
       {ico:'alertas', lbl:'Excesso de velocidade (média)', val: mVel!==null?fmtNum(mVel)+' /100km':'—', cls: classificarVelocidade(mVel)},
@@ -1444,7 +1454,7 @@ function openVeiculoDetail(placa){
       const badge = (label) => label==='Excelente'?'excelente':(label==='Bom'?'bom':(label==='Atenção'?'atencao':(label==='Precisa melhorar'?'critico':'')));
       const indicadores = [
         {ico:'drops', lbl:'Faixa verde', val: v.faixa_verde!==null?fmtPct(v.faixa_verde)+'%':'—', cls: classificarFaixaVerde(v.faixa_verde)},
-        {ico:'telemetria', lbl:'RPM elevado', val: v.rpm!==null?fmtPct(v.rpm,2)+'% do tempo ligado':'—', cls: classificarRpm(v.rpm)},
+        {ico:'telemetria', lbl:'RPM elevado', val: v.rpm!==null?fmtPct(v.rpm,2)+'% do tempo em movimento':'—', cls: classificarRpm(v.rpm)},
         {ico:'ofensores', lbl:'Frenagens bruscas', val: v.frenagem!==null?fmtNum(v.frenagem)+' eventos/100km':'—', sub: contarEventos(v.frenagem)!==null?`${fmtInt(contarEventos(v.frenagem))} evento(s) na semana`:'', cls: classificarFrenAcel(v.frenagem,[0.03,0.07,0.12])},
         {ico:'veiculos', lbl:'Acelerações bruscas', val: v.aceleracao!==null?fmtNum(v.aceleracao)+' eventos/100km':'—', sub: contarEventos(v.aceleracao)!==null?`${fmtInt(contarEventos(v.aceleracao))} evento(s) na semana`:'', cls: classificarFrenAcel(v.aceleracao,[0.02,0.05,0.10])},
         {ico:'alertas', lbl:'Excesso de velocidade', val: v.velocidade!==null?fmtNum(v.velocidade)+' eventos/100km':'—', sub: contarEventos(v.velocidade)!==null?`${fmtInt(contarEventos(v.velocidade))} evento(s) na semana`:'', cls: classificarVelocidade(v.velocidade)},
@@ -1560,10 +1570,11 @@ function viewRotas(){
     </div>
     <div class="card" style="margin-bottom:20px;">
       <h3>Peso x Média por Veículo</h3>
-      <div class="card-sub">cada ponto é um veículo da frota atual · peso médio real (cargas jan–ago) x km/L estimado desta semana · cor = severidade · veículos com peso médio acima de 50 t (50.000 kg) são excluídos por serem inconsistentes na origem · passe o mouse ou clique num ponto para ver a placa</div>
+      <div class="card-sub">cada ponto é um veículo da frota atual · peso médio real (cargas jan–ago) x km/L estimado desta semana · cor = nota de condução (vermelho crítico ≤75 · azul bom 76–85 · verde excelente &gt;85) · veículos com peso médio acima de 50 t (50.000 kg) são excluídos por serem inconsistentes na origem · passe o mouse ou clique num ponto para ver a placa</div>
       ${(() => {
+        const corPorNota = {critico:'var(--red)', bom:'var(--brand)', excelente:'var(--green)', indisponivel:'var(--muted-2)'};
         const pontos = DATA.veiculos.filter(v=>v.peso_medio_kg && v.peso_medio_kg<=50000 && v.estimativa_kml && v.estimativa_kml>=1 && v.estimativa_kml<=6).map(v=>({
-          x:v.peso_medio_kg, y:v.estimativa_kml, r:4+Math.min(6,v.distancia_km/1000), color:sevColor(v.severidade),
+          x:v.peso_medio_kg, y:v.estimativa_kml, r:4+Math.min(6,v.distancia_km/1000), color:corPorNota[classificarPorNota(calcularNota(v))],
           placa:v.placa, tooltip:`${v.placa} · ${v.operacao}\nPeso médio: ${fmtInt(v.peso_medio_kg)} kg\nkm/L: ${fmtNum(v.estimativa_kml)}\nClique para abrir a placa`
         }));
         return pontos.length ? scatterChart(pontos) + `<div class="muted" style="text-align:center;">${pontos.length} veículos com peso médio e km/L disponíveis · eixo X: kg · eixo Y: km/L</div>` : emptyState('rotas','Sem cruzamento suficiente','Poucos veículos da frota atual têm peso médio (cargas) e km/L (telemetria) ao mesmo tempo.');
@@ -1967,32 +1978,53 @@ function viewPx(){
     `;
   }
   const r = PX_FROTA || recalcularPxFrota();
-  const distrib = (campo) => { const c={}; PX_MOTORISTAS.forEach(m=>{ const k=m[campo]||'—'; c[k]=(c[k]||0)+1; }); return Object.entries(c).sort((a,b)=>b[1]-a[1]); };
+  // Filtro de operação do topo: só mostra os PX vinculados a uma placa daquela
+  // operação. Quem ainda não bateu com nenhuma placa (naoVinculados) não tem
+  // operação conhecida, então esse recorte só faz sentido sem filtro.
+  const vinculados = opFiltro ? r.vinculados.filter(m=>m.operacao===opFiltro) : r.vinculados;
+  const naoVinculados = opFiltro ? [] : r.naoVinculados;
+  const mediaDe = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+  const notaMediaVinculados = mediaDe(vinculados.map(m=>m.nota));
+  const custoTotalVinculados = vinculados.reduce((a,m)=>a+(m.custoDelta||0),0);
+  const litrosTotalVinculados = vinculados.reduce((a,m)=>a+(m.deltaLitros||0),0);
+  const distrib = (campo) => {
+    const base = opFiltro ? PX_MOTORISTAS.filter(m=>vinculados.some(v=>v.nome===m.nome)) : PX_MOTORISTAS;
+    const c={}; base.forEach(m=>{ const k=m[campo]||'—'; c[k]=(c[k]||0)+1; }); return Object.entries(c).sort((a,b)=>b[1]-a[1]);
+  };
   return `
-    <div class="page-head"><div><h1>PX x Frota</h1><p>${PX_MOTORISTAS.length} motoristas PX importados nesta sessão · ${r.vinculados.length} vinculados a uma placa via o relatório de Cargas</p></div></div>
+    <div class="page-head"><div><h1>PX x Frota</h1><p>${opFiltro?`${vinculados.length} motoristas PX vinculados a ${opFiltro}`:`${PX_MOTORISTAS.length} motoristas PX importados nesta sessão · ${r.vinculados.length} vinculados a uma placa via o relatório de Cargas`}</p></div></div>
     <div class="grid g4" style="margin-bottom:20px;">
-      ${kpiCard('px','Motoristas PX importados', PX_MOTORISTAS.length)}
-      ${kpiCard('veiculos','Vinculados a placa', r.vinculados.length+'/'+PX_MOTORISTAS.length)}
-      ${kpiCard('target','Nota média PX', r.notaMediaPx!==null?Math.round(r.notaMediaPx):'—', '', r.notaMediaFrotaGeral!==null?`vs ${Math.round(r.notaMediaFrotaGeral)} da frota geral`:'')}
-      ${kpiCard('money', (r.custoTotalDelta||0)>0?'Custo extra em diesel':'Economia em diesel', fmtMoney(Math.abs(r.custoTotalDelta||0)), '', r.litrosTotalDelta!==null?`${fmtNum(Math.abs(r.litrosTotalDelta))} L ${r.litrosTotalDelta>0?'a mais':'a menos'} que a frota da mesma operação`:'')}
+      ${opFiltro ? `
+        ${kpiCard('px','PX nesta operação', vinculados.length)}
+        ${kpiCard('target','Nota média PX (operação)', notaMediaVinculados!==null?Math.round(notaMediaVinculados):'—')}
+        ${kpiCard('money', (custoTotalVinculados||0)>0?'Custo extra em diesel':'Economia em diesel', fmtMoney(Math.abs(custoTotalVinculados||0)))}
+        ${kpiCard('rotas','Litros vs. frota (operação)', `${litrosTotalVinculados>0?'+':''}${fmtInt(litrosTotalVinculados||0)} L`)}
+      ` : `
+        ${kpiCard('px','Motoristas PX importados', PX_MOTORISTAS.length)}
+        ${kpiCard('veiculos','Vinculados a placa', r.vinculados.length+'/'+PX_MOTORISTAS.length)}
+        ${kpiCard('target','Nota média PX', r.notaMediaPx!==null?Math.round(r.notaMediaPx):'—', '', r.notaMediaFrotaGeral!==null?`vs ${Math.round(r.notaMediaFrotaGeral)} da frota geral`:'')}
+        ${kpiCard('money', (r.custoTotalDelta||0)>0?'Custo extra em diesel':'Economia em diesel', fmtMoney(Math.abs(r.custoTotalDelta||0)), '', r.litrosTotalDelta!==null?`${fmtNum(Math.abs(r.litrosTotalDelta))} L ${r.litrosTotalDelta>0?'a mais':'a menos'} que a frota da mesma operação`:'')}
+      `}
     </div>
     <div class="grid g2" style="align-items:start; margin-bottom:20px;">
       <div class="card"><h3>Distribuição por UF</h3>${hbarChart(distrib('uf'), ()=>'var(--brand)')}</div>
       <div class="card"><h3>Distribuição por tipo de veículo</h3>${hbarChart(distrib('tipo_veiculo'), ()=>'var(--brand-mid)')}</div>
     </div>
     <div class="table-wrap" style="margin-bottom:20px;">
-      <div class="table-tools"><b style="font-size:13px;">PX vinculados a uma placa</b><span class="muted">— nota de condução e consumo real da telemetria, comparados à média da frota própria na mesma operação</span></div>
+      <div class="table-tools"><b style="font-size:13px;">PX vinculados a uma placa${opFiltro?' — '+opFiltro:''}</b><span class="muted">— nota de condução e consumo real da telemetria, comparados à média da frota própria na mesma operação</span></div>
       <div class="table-scroll">
-      ${r.vinculados.length ? `<table><thead><tr><th>Motorista</th><th>Operação</th><th>Placa(s)</th><th class="num">Nota PX</th><th class="num">Nota frota (op.)</th><th class="num">km/L PX</th><th class="num">km/L frota (op.)</th><th class="num">Litros vs. frota</th><th class="num">Custo vs. frota</th></tr></thead>
-      <tbody>${r.vinculados.map(m=>`<tr onclick="openVeiculoDetail('${m.placas[0]}')"><td>${m.nome}</td><td>${m.operacao}</td><td class="placa">${m.placas.join(', ')}</td><td class="num"><b>${m.nota}</b></td><td class="num muted">${m.notaFrotaOp??'—'}</td><td class="num">${m.kml!==null?fmtNum(m.kml):'—'}</td><td class="num muted">${m.kmlFrotaOp!==null?fmtNum(m.kmlFrotaOp):'—'}</td><td class="num">${m.deltaLitros!==null?`<span style="color:${m.deltaLitros>0?'var(--red)':'var(--green)'};">${m.deltaLitros>0?'+':''}${fmtInt(m.deltaLitros)} L</span>`:'—'}</td><td class="num">${m.custoDelta!==null?`<span style="color:${m.custoDelta>0?'var(--red)':'var(--green)'};">${m.custoDelta>0?'+':''}${fmtMoney(m.custoDelta)}</span>`:'—'}</td></tr>`).join('')}</tbody></table>`
-      : `<div class="muted" style="padding:20px;">Nenhum motorista PX bateu com um nome do relatório de Cargas — confira se o relatório de Cargas importado traz a coluna de motorista, e se os nomes batem com os da planilha PX.</div>`}
+      ${vinculados.length ? `<table><thead><tr><th>Motorista</th><th>Operação</th><th>Placa(s)</th><th class="num">Nota PX</th><th class="num">Nota frota (op.)</th><th class="num">km/L PX</th><th class="num">km/L frota (op.)</th><th class="num">Litros vs. frota</th><th class="num">Custo vs. frota</th></tr></thead>
+      <tbody>${vinculados.map(m=>`<tr onclick="openVeiculoDetail('${m.placas[0]}')"><td>${m.nome}</td><td>${m.operacao}</td><td class="placa">${m.placas.join(', ')}</td><td class="num"><b>${m.nota}</b></td><td class="num muted">${m.notaFrotaOp??'—'}</td><td class="num">${m.kml!==null?fmtNum(m.kml):'—'}</td><td class="num muted">${m.kmlFrotaOp!==null?fmtNum(m.kmlFrotaOp):'—'}</td><td class="num">${m.deltaLitros!==null?`<span style="color:${m.deltaLitros>0?'var(--red)':'var(--green)'};">${m.deltaLitros>0?'+':''}${fmtInt(m.deltaLitros)} L</span>`:'—'}</td><td class="num">${m.custoDelta!==null?`<span style="color:${m.custoDelta>0?'var(--red)':'var(--green)'};">${m.custoDelta>0?'+':''}${fmtMoney(m.custoDelta)}</span>`:'—'}</td></tr>`).join('')}</tbody></table>`
+      : (opFiltro
+        ? `<div class="muted" style="padding:20px;">Nenhum motorista PX vinculado a ${opFiltro} nesta seleção.</div>`
+        : `<div class="muted" style="padding:20px;">Nenhum motorista PX bateu com um nome do relatório de Cargas — confira se o relatório de Cargas importado traz a coluna de motorista, e se os nomes batem com os da planilha PX.</div>`)}
       </div>
     </div>
-    ${r.naoVinculados.length ? `<div class="card"><h3>PX sem placa identificada (${r.naoVinculados.length})</h3><div class="card-sub">nome não encontrado no relatório de Cargas desta sessão — confira grafia/acentos, ou importe o período de Cargas correspondente</div>
-      <div class="table-scroll" style="max-height:240px; overflow-y:auto;"><table><tbody>${r.naoVinculados.map(m=>`<tr><td>${m.nome}</td><td class="muted">${m.uf||'—'}</td><td class="muted">${m.tipo_veiculo||'—'}</td></tr>`).join('')}</tbody></table></div>
+    ${naoVinculados.length ? `<div class="card"><h3>PX sem placa identificada (${naoVinculados.length})</h3><div class="card-sub">nome não encontrado no relatório de Cargas desta sessão — confira grafia/acentos, ou importe o período de Cargas correspondente</div>
+      <div class="table-scroll" style="max-height:240px; overflow-y:auto;"><table><tbody>${naoVinculados.map(m=>`<tr><td>${m.nome}</td><td class="muted">${m.uf||'—'}</td><td class="muted">${m.tipo_veiculo||'—'}</td></tr>`).join('')}</tbody></table></div>
       </div>` : ''}
     <div class="card" style="margin-top:16px;">
-      <p class="muted">Metodologia: para cada PX vinculado a uma placa (por nome, cruzando a planilha de Motoristas PX com o motorista de cada carga em Cargas), a nota de condução e o km/L vêm da telemetria real da(s) placa(s) que ele operou. "Litros vs. frota" é a diferença entre o litros real consumido e o litros que seria esperado rodando os mesmos km na média de km/L da frota própria da mesma operação — positivo é gasto a mais, negativo é economia. "Custo vs. frota" é essa diferença × ${fmtMoney(DIESEL_PRECO_ASSUMIDO)}/L (preço do diesel configurado).</p>
+      <p class="muted">Metodologia: para cada PX vinculado a uma placa (por nome, cruzando a planilha de Motoristas PX com o(s) motorista(s) de cada carga em Cargas), a nota de condução e o km/L vêm da telemetria real da(s) placa(s) que ele operou. "Litros vs. frota" é a diferença entre o litros real consumido e o litros que seria esperado rodando os mesmos km na média de km/L da frota própria da mesma operação — positivo é gasto a mais, negativo é economia. "Custo vs. frota" é essa diferença × ${fmtMoney(DIESEL_PRECO_ASSUMIDO)}/L (preço do diesel configurado).</p>
     </div>
   `;
 }
@@ -2274,10 +2306,12 @@ function normalizarNome(s){ return (s||'').trim().toUpperCase().normalize('NFD')
 function recalcularPxFrota(){
   const placasPorNome = {};
   CARGAS_ACUMULADAS.forEach(c=>{
-    if(!c.motorista || !c.placa) return;
-    const key = normalizarNome(c.motorista);
-    if(!placasPorNome[key]) placasPorNome[key] = new Set();
-    placasPorNome[key].add(c.placa);
+    if(!c.motoristas || !c.motoristas.length || !c.placa) return;
+    c.motoristas.forEach(nome=>{
+      const key = normalizarNome(nome);
+      if(!placasPorNome[key]) placasPorNome[key] = new Set();
+      placasPorNome[key].add(c.placa);
+    });
   });
   const porOperacaoFrota = {}; // operacao -> {somaKml:[], somaNota:[]} usando toda a frota atual (referência)
   DATA.veiculos.forEach(v=>{
@@ -2544,9 +2578,9 @@ function renderCfgTab(tab){
       <div class="card">
         <h3>Fórmula oficial de cálculo da média</h3>
         <div style="background:var(--brand-bg); border:1px solid var(--brand-light); border-radius:10px; padding:12px 14px; font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:var(--brand); margin-bottom:10px;">
-          Média (km/L) = (Maior KM − Menor KM) ÷ Somatória de Litros
+          Média (km/L) = Σ KM Total ÷ Σ Litros
         </div>
-        <p class="muted" style="margin:0;">Aplicada placa a placa no período; a média da frota (ou de uma operação filtrada) soma os KMs e os litros elegíveis antes de dividir — nunca a média das médias.</p>
+        <p class="muted" style="margin:0;">Consolidada por placa + mês antes de calcular a razão: soma o KM Total de cada abastecimento (vem pronto do relatório oficial — só recalcula por odômetro Km−Km anterior quando o arquivo não traz a coluna KM TOTAL) e soma os litros, depois divide. A média da frota (ou de uma operação filtrada) soma os KMs e os litros elegíveis de todas as placas antes de dividir — nunca a média das médias.</p>
       </div>
       <div class="card">
         <h3>Preço do diesel (usado nas estimativas)</h3>
@@ -3015,6 +3049,19 @@ const FAIXAS_PESO_JS = [[0,10000,'0–10 t'],[10000,20000,'10–20 t'],[20000,25
 function faixaDe(pesoKg){ for(const [lo,hi,label] of FAIXAS_PESO_JS){ if(pesoKg>=lo && pesoKg<hi) return label; } return '>30 t'; }
 const CLIENTES_CONHECIDOS = ['NESTLE','MARTIN BROWER','BRF','MINERVA','MELI','MERCADO LIVRE'];
 
+// O relatório real de Cargas traz "Veículo" e "Motoristas" (plural) com MAIS de
+// um valor por linha quando é viagem em dupla — ex.: Veículo "RLG0H07, SXJ9I34"
+// e Motoristas "400.595.168-60 - JOAO VITOR CARDOSO DA SILVA, ..." (CPF - NOME,
+// separados por vírgula). extrairPlacas pega todas as placas da célula;
+// extrairNomesMotoristas separa por vírgula e tira o prefixo de CPF de cada nome.
+function extrairPlacas(texto){
+  const m = (texto||'').toUpperCase().match(new RegExp(PLACA_RE.source,'g'));
+  return m ? [...new Set(m)] : [];
+}
+function extrairNomesMotoristas(texto){
+  if(!texto) return [];
+  return texto.split(',').map(seg=>seg.trim().replace(/^\d{3}\.\d{3}\.\d{3}-\d{2}\s*-\s*/,'').trim()).filter(Boolean);
+}
 function processarCsvCargas(texto){
   const linhas = linhasComCabecalho(texto);
   const delim = detectarDelimitador(linhas[0]);
@@ -3023,7 +3070,7 @@ function processarCsvCargas(texto){
   const cVeic = acharColuna(idx,'Veículo'), cTipo = acharColuna(idx,'Tipo de Operação'),
         cOrigem = acharColuna(idx,'Origem'), cDestino = acharColuna(idx,'Destino'),
         cPeso = acharColuna(idx,'Peso Carga'), cData = acharColuna(idx,'Data da Carga'),
-        cMotorista = acharColuna(idx,'Motorista','Condutor','Nome do Motorista','Motorista Responsável','Motorista Responsavel');
+        cMotorista = acharColuna(idx,'Motoristas','Motorista','Condutor','Nome do Motorista','Motorista Responsável','Motorista Responsavel');
   if(cOrigem===undefined || cDestino===undefined) throw new Error('Colunas Origem/Destino não encontradas. Cabeçalho: '+header.join(' | '));
   const registros=[];
   for(let i=1;i<linhas.length;i++){
@@ -3034,11 +3081,16 @@ function processarCsvCargas(texto){
     const tipo=(cTipo!==undefined?r[cTipo]:'').toUpperCase();
     const vazio = tipo.includes('VAZIO');
     const peso = brFloat(cPeso!==undefined?r[cPeso]:null);
-    const placa = cVeic!==undefined? extrairPlaca(r[cVeic]||'') : null;
-    const motorista = cMotorista!==undefined? (r[cMotorista]||'').trim() : '';
+    const placas = cVeic!==undefined? extrairPlacas(r[cVeic]||'') : [];
+    const motoristas = cMotorista!==undefined? extrairNomesMotoristas(r[cMotorista]||'') : [];
     const dataCarga = cData!==undefined?r[cData]:'';
     const mMes = (dataCarga.match(/^(\d{2})\/(\d{2})\/(\d{4})/)||[])[2];
-    registros.push({origem,destino,peso,vazio,placa,motorista,mes:mMes,tipo,data:(dataCarga||'').trim()});
+    // Uma carga com 2 placas (viagem em dupla) é 2 caminhões fazendo o trajeto —
+    // vira um registro por placa, cada um com a lista inteira de motoristas da
+    // carga (o relatório não diz qual motorista foi em qual caminhão da dupla).
+    (placas.length?placas:[null]).forEach(placa=>{
+      registros.push({origem,destino,peso,vazio,placa,motoristas,mes:mMes,tipo,data:(dataCarga||'').trim()});
+    });
   }
   CARGAS_ACUMULADAS = CARGAS_ACUMULADAS.concat(registros);
   return registros;
