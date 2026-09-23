@@ -193,6 +193,9 @@ tbody tr:hover{background:var(--brand-bg);}
 /* ============ detail panel ============ */
 .detail-overlay{position:fixed; inset:0; background:rgba(10,27,77,.4); display:flex; justify-content:flex-end; z-index:60;}
 .detail-panel{width:min(600px,94vw); background:var(--card); height:100%; overflow-y:auto; padding:26px; box-shadow:-10px 0 30px rgba(10,27,77,.12);}
+/* painel é estreito (3 KPIs por linha) — fonte menor evita palavras como
+   "Excelente" quebrando feio no meio ou estourando a borda do card */
+.detail-panel .kpi .num{font-size:14.5px;}
 .detail-panel .close{float:right; cursor:pointer; color:var(--muted); font-size:24px; line-height:1;}
 .detail-head{display:flex; align-items:center; gap:14px; margin-bottom:6px;}
 .detail-head .icon{width:56px; height:56px; border-radius:14px; background:var(--brand-bg); display:flex; align-items:center; justify-content:center; color:var(--brand);}
@@ -1421,7 +1424,7 @@ function openVeiculoDetail(placa){
         <div class="grid g3" style="margin-bottom:16px;">
           ${kpiCard('target','Nota de condução', nota!==null?nota:'—')}
           ${kpiCard('drops','Km/L estimado', v.estimativa_kml?fmtNum(v.estimativa_kml):'—')}
-          ${kpiCard('veiculos','Status', sevLabel(v.severidade))}
+          ${kpiCard('veiculos','Status', (()=>{ const st=classificarPorNota(nota); return st==='critico'?'Crítico':(st==='bom'?'Bom':(st==='excelente'?'Excelente':'—')); })())}
         </div>
         <div class="card" style="margin-bottom:16px;">
           <h3>Indicadores-chave</h3>
