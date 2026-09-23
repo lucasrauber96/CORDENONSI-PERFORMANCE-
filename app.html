@@ -846,15 +846,18 @@ function segmentosPorNota(lista){
       do que o esperado);
    3) valor estimado = soma dos gaps em litros × preço do diesel.
    ========================================================================= */
+// Reaproveita calcularMediaKmlDeLista (definida mais abaixo, mas funções são
+// hoisted) pra cada operação — garante que a média de referência de cada
+// operação já descarta veículos com km/L individual fora de 1,5–5,0, a mesma
+// regra usada em toda média do app. Antes somava litros_consumidos/distancia_km
+// de TODOS os veículos sem filtro nenhum: um único litros_consumidos errado
+// (quase zero) bastava pra jogar a média da operação inteira pra 26, 88 km/L —
+// fisicamente impossível pra caminhão, e foi exatamente o que o usuário reportou.
 function mediaKmlPorOperacao(){
-  const acc = {};
-  DATA.veiculos.forEach(v=>{
-    if(!v.litros_consumidos) return;
-    if(!acc[v.operacao]) acc[v.operacao] = {km:0,litros:0};
-    acc[v.operacao].km += v.distancia_km; acc[v.operacao].litros += v.litros_consumidos;
-  });
+  const porOp = {};
+  DATA.veiculos.forEach(v=>{ (porOp[v.operacao]=porOp[v.operacao]||[]).push(v); });
   const medias = {};
-  Object.entries(acc).forEach(([op,d])=>{ medias[op] = d.litros? d.km/d.litros : null; });
+  Object.entries(porOp).forEach(([op,lista])=>{ medias[op] = calcularMediaKmlDeLista(lista); });
   return medias;
 }
 /* Eventos totais de telemetria (contagem absoluta, não taxa/100km) — usado
@@ -920,6 +923,10 @@ function calcularImpactoFinanceiro(){
   veiculosAtuais().forEach(v=>{
     const mediaOp = medias[v.operacao];
     if(!mediaOp || !v.litros_consumidos || !v.estimativa_kml) return;
+    // Mesma faixa plausível de km/L (1,5–5,0) usada em toda média do app —
+    // um veículo individual fora dela (litros_consumidos incompleto/errado)
+    // não entra na conta nem aparece nas listas "abaixo"/"esperado".
+    if(v.estimativa_kml<KML_ELEGIVEL_MIN || v.estimativa_kml>KML_ELEGIVEL_MAX) return;
     consumoReal += v.litros_consumidos;
     const esperadoLitros = v.distancia_km/mediaOp;
     consumoEsperado += esperadoLitros;
@@ -2017,7 +2024,7 @@ function viewPx(){
       <div class="table-tools"><b style="font-size:13px;">PX vinculados a uma placa${opFiltro?' — '+opFiltro:''}</b><span class="muted">— nota de condução e consumo real da telemetria, comparados à média da frota própria na mesma operação</span></div>
       <div class="table-scroll">
       ${vinculados.length ? `<table><thead><tr><th>Motorista</th><th>Operação</th><th>Placa(s)</th><th class="num">Nota PX</th><th class="num">Nota frota (op.)</th><th class="num">km/L PX</th><th class="num">km/L frota (op.)</th><th class="num">Litros vs. frota</th><th class="num">Custo vs. frota</th></tr></thead>
-      <tbody>${vinculados.map(m=>`<tr onclick="openVeiculoDetail('${m.placas[0]}')"><td>${m.nome}</td><td>${m.operacao}</td><td class="placa">${m.placas.join(', ')}</td><td class="num"><b>${m.nota}</b></td><td class="num muted">${m.notaFrotaOp??'—'}</td><td class="num">${m.kml!==null?fmtNum(m.kml):'—'}</td><td class="num muted">${m.kmlFrotaOp!==null?fmtNum(m.kmlFrotaOp):'—'}</td><td class="num">${m.deltaLitros!==null?`<span style="color:${m.deltaLitros>0?'var(--red)':'var(--green)'};">${m.deltaLitros>0?'+':''}${fmtInt(m.deltaLitros)} L</span>`:'—'}</td><td class="num">${m.custoDelta!==null?`<span style="color:${m.custoDelta>0?'var(--red)':'var(--green)'};">${m.custoDelta>0?'+':''}${fmtMoney(m.custoDelta)}</span>`:'—'}</td></tr>`).join('')}</tbody></table>`
+      <tbody>${vinculados.map(m=>`<tr onclick="openVeiculoDetail('${m.placas[0]}')"><td>${m.nome}</td><td>${m.operacao}</td><td class="placa">${m.placas.join(', ')}</td><td class="num"><b>${m.nota??'—'}</b></td><td class="num muted">${m.notaFrotaOp??'—'}</td><td class="num">${m.kml!==null?fmtNum(m.kml):'—'}</td><td class="num muted">${m.kmlFrotaOp!==null?fmtNum(m.kmlFrotaOp):'—'}</td><td class="num">${m.deltaLitros!==null?`<span style="color:${m.deltaLitros>0?'var(--red)':'var(--green)'};">${m.deltaLitros>0?'+':''}${fmtInt(m.deltaLitros)} L</span>`:'—'}</td><td class="num">${m.custoDelta!==null?`<span style="color:${m.custoDelta>0?'var(--red)':'var(--green)'};">${m.custoDelta>0?'+':''}${fmtMoney(m.custoDelta)}</span>`:'—'}</td></tr>`).join('')}</tbody></table>`
       : (opFiltro
         ? `<div class="muted" style="padding:20px;">Nenhum motorista PX vinculado a ${opFiltro} nesta seleção.</div>`
         : `<div class="muted" style="padding:20px;">Nenhum motorista PX bateu com um nome do relatório de Cargas — confira se o relatório de Cargas importado traz a coluna de motorista, e se os nomes batem com os da planilha PX.</div>`)}
@@ -2316,12 +2323,16 @@ function recalcularPxFrota(){
       placasPorNome[key].add(c.placa);
     });
   });
-  const porOperacaoFrota = {}; // operacao -> {somaKml:[], somaNota:[]} usando toda a frota atual (referência)
+  // kmlFrotaOp vem da mesma mediaKmlPorOperacao() usada em Impacto Financeiro —
+  // já descarta veículo com km/L individual fora de 1,5–5,0 (ver essa função).
+  // notaFrotaOp continua coletada aqui: nota de condução não depende de
+  // litros/km, então não sofre do mesmo problema de dado incompleto.
+  const kmlPorOperacaoFrota = mediaKmlPorOperacao();
+  const notasPorOperacaoFrota = {};
   DATA.veiculos.forEach(v=>{
-    if(!porOperacaoFrota[v.operacao]) porOperacaoFrota[v.operacao] = {kmls:[], notas:[]};
-    if(v.estimativa_kml!==null) porOperacaoFrota[v.operacao].kmls.push(v.estimativa_kml);
     const nota = calcularNota(v);
-    if(nota!==null) porOperacaoFrota[v.operacao].notas.push(nota);
+    if(nota===null) return;
+    (notasPorOperacaoFrota[v.operacao]=notasPorOperacaoFrota[v.operacao]||[]).push(nota);
   });
   const mediaDe = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
 
@@ -2331,24 +2342,39 @@ function recalcularPxFrota(){
     const placas = [...(placasPorNome[key]||[])];
     const veics = placas.map(p=>DATA.veiculos.find(v=>v.placa===p)).filter(Boolean);
     if(!veics.length){ motoristas.push({...px, placas, vinculado:false}); return; }
-    const totalKm = veics.reduce((a,v)=>a+v.distancia_km,0) || 1;
-    const notaPx = veics.reduce((a,v)=>a+(calcularNota(v)||0)*v.distancia_km,0)/totalKm;
-    const litrosPx = veics.reduce((a,v)=>a+(v.litros_consumidos||0),0);
+    // Nota: só entram veículos com nota calculável (6 indicadores completos) —
+    // um veículo sem telemetria completa não conta nem no numerador nem no
+    // denominador (antes um calcularNota()===null virava 0 no numerador mas
+    // ainda pesava o km no denominador, puxando a nota pra baixo à toa).
+    const veicsComNota = veics.filter(v=>calcularNota(v)!==null);
+    const kmComNota = veicsComNota.reduce((a,v)=>a+v.distancia_km,0);
+    const notaPx = kmComNota>0 ? veicsComNota.reduce((a,v)=>a+calcularNota(v)*v.distancia_km,0)/kmComNota : null;
+    // km/L e litros: só a partir de veículos com km/L individual plausível
+    // (1,5–5,0) — mesma regra de todo o app. Um litros_consumidos zerado/errado
+    // de UM veículo vinculado não pode inflar o km/L do motorista PX inteiro
+    // (foi o caso relatado: 149,04 km/L pra um motorista com um único veículo).
+    const veicsElegiveis = veics.filter(v=>v.litros_consumidos && v.estimativa_kml && v.estimativa_kml>=KML_ELEGIVEL_MIN && v.estimativa_kml<=KML_ELEGIVEL_MAX);
+    const totalKm = veicsElegiveis.reduce((a,v)=>a+v.distancia_km,0);
+    const litrosPx = veicsElegiveis.reduce((a,v)=>a+v.litros_consumidos,0);
+    const kml = (totalKm>0 && litrosPx>0) ? Math.round((totalKm/litrosPx)*100)/100 : null;
     const operacao = veics[0].operacao;
-    const kmlFrotaOp = mediaDe(porOperacaoFrota[operacao]?.kmls||[]);
-    const notaFrotaOp = mediaDe(porOperacaoFrota[operacao]?.notas||[]);
-    const litrosEsperados = kmlFrotaOp ? totalKm/kmlFrotaOp : null;
+    const kmlFrotaOp = kmlPorOperacaoFrota[operacao] ?? null;
+    const notaFrotaOp = mediaDe(notasPorOperacaoFrota[operacao]||[]);
+    // Só calcula litros/custo vs. frota quando AMBAS as médias existem e são
+    // confiáveis (km/L do PX e da operação) — pedido explícito: sem uma das
+    // duas, não calcular (em vez de mostrar um número inventado/absurdo).
+    const litrosEsperados = (kmlFrotaOp!==null && kml!==null) ? totalKm/kmlFrotaOp : null;
     const deltaLitros = litrosEsperados!==null ? litrosPx-litrosEsperados : null; // >0 = gastou mais que a média da frota na mesma operação
     motoristas.push({
-      ...px, placas, vinculado:true, operacao, km:totalKm, nota:Math.round(notaPx), litros:litrosPx,
-      kml: litrosPx? Math.round((totalKm/litrosPx)*100)/100 : null,
+      ...px, placas, vinculado:true, operacao, km:veics.reduce((a,v)=>a+v.distancia_km,0),
+      nota: notaPx!==null?Math.round(notaPx):null, litros:litrosPx, kml,
       kmlFrotaOp, notaFrotaOp: notaFrotaOp!==null?Math.round(notaFrotaOp):null,
       deltaLitros, custoDelta: deltaLitros!==null ? deltaLitros*DIESEL_PRECO_ASSUMIDO : null,
     });
   });
 
   const vinculados = motoristas.filter(m=>m.vinculado);
-  const notaMediaPx = mediaDe(vinculados.map(m=>m.nota));
+  const notaMediaPx = mediaDe(vinculados.map(m=>m.nota).filter(n=>n!==null));
   const notaMediaFrotaGeral = mediaDe(DATA.veiculos.map(v=>calcularNota(v)).filter(n=>n!==null));
   const custoTotalDelta = vinculados.reduce((a,m)=>a+(m.custoDelta||0),0);
   const litrosTotalDelta = vinculados.reduce((a,m)=>a+(m.deltaLitros||0),0);
