@@ -191,7 +191,7 @@ tbody tr:hover{background:var(--brand-bg);}
 .op-head span:not(:first-child){text-align:right;}
 
 /* ============ detail panel ============ */
-.detail-overlay{position:fixed; inset:0; background:rgba(10,27,77,.4); display:flex; justify-content:flex-end; z-index:60;}
+.detail-overlay{position:fixed; inset:0; background:rgba(10,27,77,.4); display:flex; justify-content:flex-end; z-index:80;}
 .detail-panel{width:min(600px,94vw); background:var(--card); height:100%; overflow-y:auto; padding:26px; box-shadow:-10px 0 30px rgba(10,27,77,.12);}
 /* painel é estreito (3 KPIs por linha) — fonte menor evita palavras como
    "Excelente" quebrando feio no meio ou estourando a borda do card */
@@ -601,18 +601,17 @@ function groupedBar(cats, seriesA, seriesB, labelA, labelB){
 function barLineDualAxis(cats, seriesBar, seriesLine, labelBar, labelLine){
   const w=640, h=260, pad=20, padBottom=40;
   if(!cats.length) return `<div class="empty" style="padding:24px;"><p>Sem dados suficientes</p></div>`;
-  const maxBar = Math.max(...seriesBar, 1) * 1.22;
-  const maxLine = Math.max(...seriesLine, 1) * 1.22;
+  const maxShared = Math.max(...seriesBar, ...seriesLine, 1) * 1.22;
   const plotW = w-2*pad, plotH = h-pad-padBottom;
   const bw = Math.min(46, plotW/cats.length/1.8);
   const xCenter = i => pad + (i+0.5)*(plotW/cats.length);
   const gridLines = [0,1,2,3].map(i=>{ const gy = pad + i*plotH/3; return `<line x1="${pad}" y1="${gy}" x2="${w-pad}" y2="${gy}" stroke="var(--line)" stroke-width="1"/>`; }).join('');
   const bars = cats.map((c,i)=>{
-    const bh = Math.max(2,(seriesBar[i]/maxBar)*plotH);
+    const bh = Math.max(2,(seriesBar[i]/maxShared)*plotH);
     return `<g style="cursor:pointer;"><rect x="${xCenter(i)-bw/2}" y="${h-padBottom-bh}" width="${bw}" height="${bh}" rx="3" fill="var(--brand)"><title>${c} — ${labelBar}: ${fmtInt(seriesBar[i])}</title></rect>
       <text x="${xCenter(i)}" y="${h-padBottom-bh-6}" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--text)" font-family="Montserrat">${seriesBar[i]>=1000?fmtNum(seriesBar[i]/1000,1)+'k':fmtInt(seriesBar[i])}</text></g>`;
   }).join('');
-  const yLine = v => h-padBottom - (v/maxLine)*plotH;
+  const yLine = v => h-padBottom - (v/maxShared)*plotH;
   const lineD = cats.map((c,i)=>`${i===0?'M':'L'} ${xCenter(i)} ${yLine(seriesLine[i])}`).join(' ');
   const linePts = cats.map((c,i)=>`<g style="cursor:pointer;"><circle cx="${xCenter(i)}" cy="${yLine(seriesLine[i])}" r="11" fill="transparent"><title>${c} — ${labelLine}: ${fmtInt(seriesLine[i])}</title></circle><circle cx="${xCenter(i)}" cy="${yLine(seriesLine[i])}" r="4" fill="var(--brand-light)" stroke="#fff" stroke-width="2" style="pointer-events:none;"/></g>`).join('');
   const xLabels = cats.map((c,i)=>`<text x="${xCenter(i)}" y="${h-14}" text-anchor="middle" font-size="10.5" fill="var(--muted)" font-family="Montserrat">${c}</text>`).join('');
@@ -2055,7 +2054,10 @@ function abrirBenchDetalhe(rota, faixa){
         <div class="table-scroll"><table><thead><tr><th>Data</th><th>Placa</th><th>Marca</th><th>Modelo</th><th class="num">Peso (kg)</th><th class="num">km/L do mês</th></tr></thead>
         <tbody>${detalhe.slice().sort((a,b2)=>b2.kml-a.kml).map(a=>{
           const vv = DATA.veiculos.find(v=>v.placa===a.placa);
-          return `<tr onclick="openVeiculoDetail('${a.placa}')" style="cursor:pointer;"><td class="muted" style="white-space:nowrap;">${dataAbreviada(a.data)}</td><td class="placa">${a.placa}</td><td class="muted">${vv?.marca||'—'}</td><td class="muted">${vv?.modelo||'—'}</td><td class="num">${fmtInt(a.peso)}</td><td class="num"><b>${fmtNum(a.kml)}</b></td></tr>`;
+          const cad = CADASTRO_VEICULOS[a.placa];
+          const marca = vv?.marca || cad?.marca || '—';
+          const modelo = vv?.modelo || cad?.modelo || '—';
+          return `<tr onclick="openVeiculoDetail('${a.placa}')" style="cursor:pointer;"><td class="muted" style="white-space:nowrap;">${dataAbreviada(a.data)}</td><td class="placa">${a.placa}</td><td class="muted">${marca}</td><td class="muted">${modelo}</td><td class="num">${fmtInt(a.peso)}</td><td class="num"><b>${fmtNum(a.kml)}</b></td></tr>`;
         }).join('')}</tbody></table></div>
       ` : `<p class="muted">Esta combinação rota + faixa de peso veio do processamento original (janeiro–agosto), que guardou só os números já agregados — não manteve o registro individual por viagem, então não há detalhamento por placa/data pra abrir aqui. Importe o relatório de Cargas de um novo período em Importações: o benchmark recalculado na sessão já guarda cada viagem e passa a abrir o detalhe normalmente.</p>`}
     </div>`;
