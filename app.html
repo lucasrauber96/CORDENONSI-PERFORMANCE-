@@ -477,6 +477,9 @@ function fmtNum(n,d=2){ if(n===null||n===undefined) return '—'; return n.toLoc
 function fmtMoney(n){ if(n===null||n===undefined) return '—'; return 'R$ '+Math.round(n).toLocaleString('pt-BR'); }
 const MESES_ABREV = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 function mesLabelCurto(chaveMes){ const m=(chaveMes||'').match(/^(\d{4})-(\d{2})$/); if(!m) return chaveMes; return `${MESES_ABREV[parseInt(m[2],10)-1]}/${m[1].slice(2)}`; }
+// "23/06/2026 10:00" -> "23/06" — sem hora e sem ano (tudo no app é do mesmo
+// ano corrente), pra caber numa coluna estreita perto da placa.
+function dataAbreviada(dataStr){ const m=(dataStr||'').match(/^(\d{2})\/(\d{2})/); return m ? `${m[1]}/${m[2]}` : (dataStr||'—'); }
 function sevLabel(s){ return {critico:'Crítico',atencao:'Atenção',bom:'Bom',excelente:'Excelente'}[s]||s; }
 function sevColor(s){ return {critico:'var(--red)',atencao:'var(--yellow)',bom:'var(--brand)',excelente:'var(--green)'}[s]||'var(--muted)'; }
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
@@ -538,7 +541,13 @@ function lineChart(points, opts={}){
     const gy = pad + i*(h-2*pad)/3;
     return `<line x1="${pad}" y1="${gy}" x2="${w-pad}" y2="${gy}" stroke="var(--line)" stroke-width="1"/>`;
   }).join('');
-  const dots = points.map((p,i)=>`<circle cx="${x(i)}" cy="${y(p.y)}" r="4" fill="var(--brand)" stroke="#fff" stroke-width="2"/>`).join('');
+  // Área de hover maior (invisível) + <title> nativo em cada ponto — passar o
+  // mouse mostra o valor exato daquele mês, sem precisar de JS extra.
+  const fmtValor = opts.fmt || (v=>fmtNum(v));
+  const dots = points.map((p,i)=>`<g style="cursor:pointer;">
+      <circle cx="${x(i)}" cy="${y(p.y)}" r="12" fill="transparent"><title>${p.label}: ${p.tooltip||fmtValor(p.y)}</title></circle>
+      <circle cx="${x(i)}" cy="${y(p.y)}" r="4" fill="var(--brand)" stroke="#fff" stroke-width="2" style="pointer-events:none;"/>
+    </g>`).join('');
   const labels = points.map((p,i)=>`<text x="${x(i)}" y="${h-8}" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="Montserrat">${p.label}</text>`).join('');
   return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}">
     ${gridLines}
@@ -582,6 +591,41 @@ function groupedBar(cats, seriesA, seriesB, labelA, labelB){
   <div style="display:flex;gap:16px;justify-content:center;margin-top:6px;font-size:11.5px;color:var(--muted);">
     <span><span style="display:inline-block;width:9px;height:9px;background:var(--brand);border-radius:2px;margin-right:5px;"></span>${labelA}</span>
     <span><span style="display:inline-block;width:9px;height:9px;background:var(--brand-light);border-radius:2px;margin-right:5px;"></span>${labelB}</span>
+  </div>`;
+}
+// Barras (eixo esquerdo, seriesBar) + linha (eixo direito, seriesLine) — cada
+// série com sua própria escala, como km rodado (centenas de milhar) x litros
+// gastos (dezenas de milhar) precisam pra não ficar uma ilegível ao lado da
+// outra. Rótulo em cima de cada barra/ponto + <title> nativo com o valor
+// exato no hover (sem precisar de JS extra).
+function barLineDualAxis(cats, seriesBar, seriesLine, labelBar, labelLine){
+  const w=640, h=260, pad=20, padBottom=40;
+  if(!cats.length) return `<div class="empty" style="padding:24px;"><p>Sem dados suficientes</p></div>`;
+  const maxBar = Math.max(...seriesBar, 1) * 1.22;
+  const maxLine = Math.max(...seriesLine, 1) * 1.22;
+  const plotW = w-2*pad, plotH = h-pad-padBottom;
+  const bw = Math.min(46, plotW/cats.length/1.8);
+  const xCenter = i => pad + (i+0.5)*(plotW/cats.length);
+  const gridLines = [0,1,2,3].map(i=>{ const gy = pad + i*plotH/3; return `<line x1="${pad}" y1="${gy}" x2="${w-pad}" y2="${gy}" stroke="var(--line)" stroke-width="1"/>`; }).join('');
+  const bars = cats.map((c,i)=>{
+    const bh = Math.max(2,(seriesBar[i]/maxBar)*plotH);
+    return `<g style="cursor:pointer;"><rect x="${xCenter(i)-bw/2}" y="${h-padBottom-bh}" width="${bw}" height="${bh}" rx="3" fill="var(--brand)"><title>${c} — ${labelBar}: ${fmtInt(seriesBar[i])}</title></rect>
+      <text x="${xCenter(i)}" y="${h-padBottom-bh-6}" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--text)" font-family="Montserrat">${seriesBar[i]>=1000?fmtNum(seriesBar[i]/1000,1)+'k':fmtInt(seriesBar[i])}</text></g>`;
+  }).join('');
+  const yLine = v => h-padBottom - (v/maxLine)*plotH;
+  const lineD = cats.map((c,i)=>`${i===0?'M':'L'} ${xCenter(i)} ${yLine(seriesLine[i])}`).join(' ');
+  const linePts = cats.map((c,i)=>`<g style="cursor:pointer;"><circle cx="${xCenter(i)}" cy="${yLine(seriesLine[i])}" r="11" fill="transparent"><title>${c} — ${labelLine}: ${fmtInt(seriesLine[i])}</title></circle><circle cx="${xCenter(i)}" cy="${yLine(seriesLine[i])}" r="4" fill="var(--brand-light)" stroke="#fff" stroke-width="2" style="pointer-events:none;"/></g>`).join('');
+  const xLabels = cats.map((c,i)=>`<text x="${xCenter(i)}" y="${h-14}" text-anchor="middle" font-size="10.5" fill="var(--muted)" font-family="Montserrat">${c}</text>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}">
+    ${gridLines}
+    ${bars}
+    <path d="${lineD}" fill="none" stroke="var(--brand-light)" stroke-width="2.5"/>
+    ${linePts}
+    ${xLabels}
+  </svg>
+  <div style="display:flex;gap:16px;justify-content:center;margin-top:6px;font-size:11.5px;color:var(--muted);">
+    <span><span style="display:inline-block;width:9px;height:9px;background:var(--brand);border-radius:2px;margin-right:5px;"></span>${labelBar}</span>
+    <span><span style="display:inline-block;width:9px;height:9px;background:var(--brand-light);border-radius:50%;margin-right:5px;"></span>${labelLine}</span>
   </div>`;
 }
 
@@ -892,14 +936,11 @@ function pctCriticoPorEventos(lista){
   const eventosCriticos = lista.filter(v=>v.severidade==='critico').reduce((a,v)=>a+eventosAbsVeiculo(v),0);
   return Math.round((eventosCriticos/totalEventos)*1000)/10;
 }
-function calcularMediaKmlDeLista(lista){
-  // Função modular única: usada para a frota inteira OU para uma operação
-  // filtrada — nunca lê um valor pré-calculado global, sempre soma de novo
-  // a partir da lista recebida (parseFloat + guarda de divisão por zero).
-  // Descarta veículos com km/L individual fora da faixa plausível
-  // (KML_ELEGIVEL_MIN–MAX) antes de somar — mesma regra do import de
-  // Abastecimento, pra litros_consumidos incompleto/errado de um veículo não
-  // inflar a média de todo o período (ver nota em KML_ELEGIVEL_MIN acima).
+// Soma km/litros só dos veículos com km/L individual plausível (1,5–5,0) —
+// função modular única reaproveitada por calcularMediaKmlDeLista() e por
+// qualquer outro lugar que precise de um total de km/litros confiável (ex.:
+// o ponto "estimativa" do mês corrente no gráfico de evolução).
+function kmLitrosElegiveis(lista){
   let km = 0, litros = 0;
   lista.forEach(v=>{
     const d = parseFloat(v.distancia_km) || 0;
@@ -910,7 +951,56 @@ function calcularMediaKmlDeLista(lista){
       km += Math.abs(d); litros += Math.abs(l);
     }
   });
+  return {km, litros};
+}
+function calcularMediaKmlDeLista(lista){
+  // Função modular única: usada para a frota inteira OU para uma operação
+  // filtrada — nunca lê um valor pré-calculado global, sempre soma de novo
+  // a partir da lista recebida.
+  const {km, litros} = kmLitrosElegiveis(lista);
   return litros>0 ? Math.round((km/litros)*100)/100 : null;
+}
+// EVOLUCAO_KML vem do build original (jan–ago já auditado + um último ponto
+// "estimado" travado em jan-set, sem o filtro de km/L plausível). Esse ponto
+// travado é o que causava o salto visual grande no gráfico "Evolução
+// Histórica da Média" — o valor batido no build (ex.: 3,34) não passava pela
+// mesma faixa de elegibilidade (1,5–5,0) que toda outra média do app já usa,
+// enquanto a "Média Geral (km/L)" recalculada na tela dava um número bem
+// diferente (ex.: 2,92) pros mesmos veículos. Essa função troca só o último
+// ponto: usa o km/L oficial do Abastecimento já importado nesta sessão pro
+// mês corrente se existir, senão recalcula ao vivo com o mesmo filtro.
+function evolucaoKmlAtualizada(){
+  if(!EVOLUCAO_KML.length) return EVOLUCAO_KML;
+  const base = EVOLUCAO_KML.slice(0,-1);
+  const ultimo = EVOLUCAO_KML[EVOLUCAO_KML.length-1];
+  if(ABASTECIMENTO && ultimo.mes){
+    const real = ABASTECIMENTO.evolucao.find(e=>e.mes===ultimo.mes);
+    if(real && real.kml!==null) return base.concat([{...ultimo, kml:real.kml, estimado:false}]);
+  }
+  const kmlAoVivo = calcularMediaKmlDeLista(DATA_ATUAL.veiculos);
+  return kmlAoVivo!==null ? base.concat([{...ultimo, kml:kmlAoVivo}]) : EVOLUCAO_KML;
+}
+// Série "Consumo em Litros x Kms Rodados" mês a mês, desde janeiro — nunca
+// inventa mês nenhum: janeiro–agosto vêm de EVOLUCAO_KML (dado real já
+// auditado, embutido no sistema — não depende de reimportar nada na sessão);
+// qualquer mês reimportado no Abastecimento desta sessão sobrescreve com o
+// dado oficial mais recente; o mês corrente, se ainda não tiver Abastecimento
+// real importado, entra como estimativa ao vivo (telemetria, mesmo filtro de
+// plausibilidade 1,5–5,0 do resto do app) e fica marcado como estimado.
+function evolucaoLitrosKmCompleta(){
+  const porMes = {};
+  EVOLUCAO_KML.forEach(e=>{
+    if(!e.estimado && e.km!=null && e.litros!=null) porMes[e.mes] = {mes:e.mes, km:e.km, litros:e.litros, kml:e.kml, estimado:false};
+  });
+  if(ABASTECIMENTO){
+    ABASTECIMENTO.evolucao.forEach(e=>{ if(e.km!=null && e.litros!=null) porMes[e.mes] = {mes:e.mes, km:e.km, litros:e.litros, kml:e.kml, estimado:false}; });
+  }
+  const ultimoBaked = EVOLUCAO_KML[EVOLUCAO_KML.length-1];
+  if(ultimoBaked && ultimoBaked.mes && !porMes[ultimoBaked.mes]){
+    const {km, litros} = kmLitrosElegiveis(DATA_ATUAL.veiculos);
+    if(litros>0) porMes[ultimoBaked.mes] = {mes:ultimoBaked.mes, km:Math.round(km), litros:Math.round(litros), kml:Math.round((km/litros)*100)/100, estimado:true};
+  }
+  return Object.values(porMes).sort((a,b)=>a.mes<b.mes?-1:1);
 }
 function calcularImpactoFinanceiro(){
   // Médias de referência por operação sempre vêm da frota inteira (senão, ao
@@ -1032,7 +1122,7 @@ function abrirAnaliseOfensor(placa){
   const {v, nota, problemas, mediaOp, notaMediaOp, comparacaoRota} = a;
   const overlay = el(`<div class="modal-overlay"></div>`);
   const diagnosticoHtml = problemas.length
-    ? `<ul style="margin:0; padding-left:18px; font-size:13px; line-height:1.9;">${problemas.map(p=>`<li><b>${p.lbl}</b> — <span class="pill dot ${p.cls==='Precisa melhorar'?'critico':'atencao'}" style="margin-left:2px;">${p.cls}</span></li>`).join('')}</ul>`
+    ? `<div>${problemas.map(p=>`<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 2px; border-bottom:1px solid var(--line);"><b style="font-size:13px;">${p.lbl}</b><span class="pill dot ${p.cls==='Precisa melhorar'?'critico':'atencao'}" style="flex-shrink:0;">${p.cls}</span></div>`).join('')}</div>`
     : `<p style="font-size:13px; color:var(--green);">Nenhum indicador em Atenção/Precisa melhorar nesta semana.</p>`;
   const compOpHtml = `<p style="font-size:13px; line-height:1.7;">
     Nota de condução: <b>${nota??'—'}</b> ${notaMediaOp!==null?`vs média da operação <b>${Math.round(notaMediaOp)}</b> (${nota!==null&&notaMediaOp!==null?(nota>=notaMediaOp?'<span style="color:var(--green)">acima</span>':'<span style="color:var(--red)">abaixo</span>'):''} da operação)`:'— sem nota média da operação pra comparar'}<br>
@@ -1100,9 +1190,9 @@ function viewVisaoGeral(){
     <div class="grid g2" style="margin-bottom:20px; align-items:start;">
       <div class="card">
         <h3>Evolução da Média de Combustível</h3>
-        <div class="card-sub">km/L · metodologia oficial (jan–ago, abastecimento) + estimativa da semana atual (telemetria)</div>
-        ${lineChart(EVOLUCAO_KML.map(e=>({label:e.mes.slice(5)+(e.estimado?'*':''), y:e.kml})))}
-        <div class="muted" style="text-align:center;">*Setembro ainda é estimativa via telemetria — importe o abastecimento do mês para o valor oficial.</div>
+        <div class="card-sub">km/L · metodologia oficial (jan–ago, abastecimento) + estimativa da semana atual (telemetria) · passe o mouse num ponto para ver a média exata</div>
+        ${(() => { const ev=evolucaoKmlAtualizada(); return lineChart(ev.map(e=>({label:e.mes.slice(5)+(e.estimado?'*':''), y:e.kml, tooltip:fmtNum(e.kml)+' km/L'}))); })()}
+        <div class="muted" style="text-align:center;">*${mesLabelCurto(EVOLUCAO_KML[EVOLUCAO_KML.length-1]?.mes)} ainda é estimativa via telemetria (recalculada ao vivo, sem outliers) — importe o abastecimento do mês para o valor oficial.</div>
       </div>
       <div class="card">
         <h3>Distribuição de Veículos</h3>
@@ -1708,16 +1798,17 @@ function viewCombustivel(){
     </div>` : ''}
     <div class="card" style="margin-bottom:20px;">
       <h3>Consumo em Litros x Kms Rodados</h3>
-      <div class="card-sub">${ABASTECIMENTO ? 'mês a mês, a partir de tudo que já foi importado do relatório de Abastecimento nesta sessão (desde janeiro, se os arquivos daqueles meses foram importados) · soma real de KM e Litros das combinações placa×mês elegíveis, nada estimado' : 'importe o relatório de abastecimento para ver este cruzamento com números reais — sem ele, não há como auditar litros x km'}</div>
+      <div class="card-sub">desde janeiro · barra = km rodado, linha = litros gastos · jan–ago vem da base mensal oficial já auditada, mês corrente é o que já foi importado de Abastecimento nesta sessão ou, sem isso, uma estimativa ao vivo via telemetria · passe o mouse numa barra ou ponto pra ver o valor exato</div>
       ${(() => {
-        if(!ABASTECIMENTO || !ABASTECIMENTO.evolucao.length) return emptyState('combustivel','Sem abastecimento importado','Importe o relatório de Abastecimento em Importações para calcular consumo (L) x km rodados por mês, sem estimativas.','Ir para Importações');
-        const meses = ABASTECIMENTO.evolucao.map(e=>mesLabelCurto(e.mes));
-        const seriesKm = ABASTECIMENTO.evolucao.map(e=>e.km);
-        const seriesLitros = ABASTECIMENTO.evolucao.map(e=>e.litros);
-        return groupedBar(meses, seriesKm, seriesLitros, 'Km rodado', 'Litros consumidos')
-          + `<div class="muted" style="text-align:center;">${ABASTECIMENTO.evolucao.length} mês(es) com dado elegível</div>`
+        const serie = evolucaoLitrosKmCompleta();
+        if(!serie.length) return emptyState('combustivel','Sem dado de km/litros disponível','Não há base mensal auditada nem abastecimento importado nesta sessão para montar esse gráfico — importe o relatório de Abastecimento em Importações.','Ir para Importações');
+        const meses = serie.map(e=>mesLabelCurto(e.mes)+(e.estimado?'*':''));
+        const seriesKm = serie.map(e=>e.km);
+        const seriesLitros = serie.map(e=>e.litros);
+        return barLineDualAxis(meses, seriesKm, seriesLitros, 'Km rodado', 'Litros gastos')
+          + `<div class="muted" style="text-align:center;">${serie.length} mês(es)${serie.some(e=>e.estimado)?` · *${mesLabelCurto(serie[serie.length-1].mes)} é só o período atual selecionado (${DATA_ATUAL.periodo}) via telemetria — não o mês inteiro, e ainda sem Abastecimento importado pra ele nesta sessão; por isso o km/litros dá menor que os outros meses (que são o mês completo)`:''}</div>`
           + `<div class="table-scroll" style="margin-top:12px;"><table><thead><tr><th>Mês</th><th class="num">Km rodado</th><th class="num">Litros consumidos</th><th class="num">km/L</th></tr></thead>
-          <tbody>${ABASTECIMENTO.evolucao.map(e=>`<tr><td>${mesLabelCurto(e.mes)}</td><td class="num">${fmtInt(e.km)}</td><td class="num">${fmtInt(e.litros)}</td><td class="num"><b>${e.kml!==null?fmtNum(e.kml):'—'}</b></td></tr>`).join('')}</tbody></table></div>`;
+          <tbody>${serie.map(e=>`<tr><td>${mesLabelCurto(e.mes)}${e.estimado?' *':''}</td><td class="num">${fmtInt(e.km)}</td><td class="num">${fmtInt(e.litros)}</td><td class="num"><b>${e.kml!==null?fmtNum(e.kml):'—'}</b></td></tr>`).join('')}</tbody></table></div>`;
       })()}
     </div>
     <div class="card" style="margin-bottom:20px;">
@@ -1729,8 +1820,8 @@ function viewCombustivel(){
     </div>
     <div class="card">
       <h3>Evolução Histórica da Média (km/L)</h3>
-      <div class="card-sub">jan–ago = base mensal oficial já auditada anteriormente · mês corrente = estimativa via telemetria até o abastecimento do mês ser importado</div>
-      ${lineChart(EVOLUCAO_KML.map(e=>({label:e.mes.slice(5)+(e.estimado?'*':''), y:e.kml})))}
+      <div class="card-sub">jan–ago = base mensal oficial já auditada anteriormente · mês corrente = estimativa via telemetria até o abastecimento do mês ser importado · passe o mouse num ponto pra ver a média exata</div>
+      ${(() => { const ev=evolucaoKmlAtualizada(); return lineChart(ev.map(e=>({label:e.mes.slice(5)+(e.estimado?'*':''), y:e.kml, tooltip:fmtNum(e.kml)+' km/L'}))); })()}
     </div>
   `;
 }
@@ -1956,13 +2047,16 @@ function abrirBenchDetalhe(rota, faixa){
   const overlay = el(`<div class="modal-overlay"></div>`);
   const detalhe = b.amostrasDetalhe;
   overlay.innerHTML = `
-    <div class="modal-box" style="width:min(640px,94vw);">
+    <div class="modal-box" style="width:min(760px,94vw);">
       <span class="close">&times;</span>
       <h3 style="margin:0 0 2px;">${rota}</h3>
       <div class="muted" style="margin-bottom:14px;">Faixa de peso: ${faixa} · ${b.amostras} amostra(s) · média ${fmtNum(b.media_kml)} km/L · confiança ${b.confianca}</div>
       ${detalhe ? `
-        <div class="table-scroll"><table><thead><tr><th>Data</th><th>Placa</th><th class="num">Peso (kg)</th><th class="num">km/L do mês</th></tr></thead>
-        <tbody>${detalhe.slice().sort((a,b2)=>b2.kml-a.kml).map(a=>`<tr onclick="openVeiculoDetail('${a.placa}')" style="cursor:pointer;"><td class="muted">${a.data||'—'}</td><td class="placa">${a.placa}</td><td class="num">${fmtInt(a.peso)}</td><td class="num"><b>${fmtNum(a.kml)}</b></td></tr>`).join('')}</tbody></table></div>
+        <div class="table-scroll"><table><thead><tr><th>Data</th><th>Placa</th><th>Marca</th><th>Modelo</th><th class="num">Peso (kg)</th><th class="num">km/L do mês</th></tr></thead>
+        <tbody>${detalhe.slice().sort((a,b2)=>b2.kml-a.kml).map(a=>{
+          const vv = DATA.veiculos.find(v=>v.placa===a.placa);
+          return `<tr onclick="openVeiculoDetail('${a.placa}')" style="cursor:pointer;"><td class="muted" style="white-space:nowrap;">${dataAbreviada(a.data)}</td><td class="placa">${a.placa}</td><td class="muted">${vv?.marca||'—'}</td><td class="muted">${vv?.modelo||'—'}</td><td class="num">${fmtInt(a.peso)}</td><td class="num"><b>${fmtNum(a.kml)}</b></td></tr>`;
+        }).join('')}</tbody></table></div>
       ` : `<p class="muted">Esta combinação rota + faixa de peso veio do processamento original (janeiro–agosto), que guardou só os números já agregados — não manteve o registro individual por viagem, então não há detalhamento por placa/data pra abrir aqui. Importe o relatório de Cargas de um novo período em Importações: o benchmark recalculado na sessão já guarda cada viagem e passa a abrir o detalhe normalmente.</p>`}
     </div>`;
   overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
@@ -2118,8 +2212,8 @@ function dadosRelatorio(tipo){
       rows: imp? [['Valor estimado', fmtMoney(imp.valorEstimado)],['Litros acima do esperado', fmtInt(imp.litrosExtras)],['Veículos abaixo da média',imp.veiculosAbaixo],['Consumo real (L)',fmtInt(imp.consumoReal)],['Consumo esperado (L)',fmtInt(imp.consumoEsperado)]] : [['Sem litros suficientes na seleção atual','—']] }; }
     case 'alertas': return {titulo:'Plano de Ação — Ofensores', cols:['Placa','Operação','Indicadores críticos','Principal alerta'],
       rows: DATA.ranking_piores.map(v=>[v.placa,v.operacao,v.n_precisa_melhorar,v.ponto_atencao])};
-    case 'historico': { const violacoes = serieQuantidadeViolacoes(); return {titulo:'Histórico Gerencial', cols:['Mês','km/L','Qtd. violações'],
-      rows: EVOLUCAO_KML.map((e,i)=>[e.mes, e.kml, (violacoes[i]||{}).qtd ?? '—'])}; }
+    case 'historico': { const violacoes = serieQuantidadeViolacoes(); const ev = evolucaoKmlAtualizada(); return {titulo:'Histórico Gerencial', cols:['Mês','km/L','Qtd. violações'],
+      rows: ev.map((e,i)=>[e.mes, e.kml, (violacoes[i]||{}).qtd ?? '—'])}; }
     default: return {titulo:'Relatório', cols:[], rows:[]};
   }
 }
@@ -2536,6 +2630,16 @@ function bindImportacoes(){
     }
   }
 }
+// Extrai o(s) mês(es) "AAAA-MM" cobertos por um período "dd/mm/aaaa a
+// dd/mm/aaaa" (formato de DATA.periodo) — usado pra saber se um novo import
+// se sobrepõe a um período já salvo no mesmo mês.
+function mesesCobertos(periodoStr){
+  if(!periodoStr) return [];
+  const m = periodoStr.match(/(\d{2})\/(\d{2})\/(\d{4}).*?(\d{2})\/(\d{2})\/(\d{4})/);
+  if(!m) return [];
+  const [,,m1,y1,,m2,y2] = m;
+  return [...new Set([`${y1}-${m1}`, `${y2}-${m2}`])];
+}
 function processarEAtualizarDados(){
   const nomeInput = document.getElementById('importPeriodoNome');
   const nome = nomeInput ? nomeInput.value.trim() : '';
@@ -2546,6 +2650,25 @@ function processarEAtualizarDados(){
   // selecionável no seletor de Período do topo, e força um re-render completo.
   aplicarExclusoesGlobais(DATA);
   MOTORISTAS = recomputarMotoristas(DATA);
+  // Se este novo período cobre o mesmo mês de calendário de um período já
+  // importado nesta sessão (ex.: "1 a 20/09" salvo antes, agora importando
+  // setembro inteiro), o período antigo daquele mês é substituído — nunca
+  // fica um período quebrado e um período completo do mesmo mês juntos nos
+  // cálculos. Nunca mexe nos meses "AAAA-MM" originais (jan–ago auditados).
+  const mesesNovos = mesesCobertos(DATA.periodo);
+  const substituidos = [];
+  if(mesesNovos.length){
+    Object.keys(HISTORICO_MESES).forEach(k=>{
+      if(!k.startsWith('imp-')) return;
+      const mesesAntigos = mesesCobertos(HISTORICO_MESES[k].periodo);
+      if(mesesAntigos.some(m=>mesesNovos.includes(m))){
+        substituidos.push(NOMES_PERIODO_IMPORTADO[k] || k);
+        delete HISTORICO_MESES[k];
+        delete NOMES_PERIODO_IMPORTADO[k];
+        if(PERIODO_SELECIONADO===k) PERIODO_SELECIONADO='atual';
+      }
+    });
+  }
   const chave = 'imp-'+Date.now();
   HISTORICO_MESES[chave] = DATA;
   NOMES_PERIODO_IMPORTADO[chave] = nome;
@@ -2554,7 +2677,11 @@ function processarEAtualizarDados(){
   if(nomeInput) nomeInput.value = '';
   render();
   const btn = document.getElementById('reprocessarBtn');
-  if(btn){ const orig=btn.innerHTML; btn.innerHTML='✓ Período salvo e disponível para análise'; setTimeout(()=>{ if(btn) btn.innerHTML=orig; },2500); }
+  if(btn){
+    const orig=btn.innerHTML;
+    btn.innerHTML = substituidos.length ? `✓ Salvo — substituiu "${substituidos.join('", "')}" (mesmo mês)` : '✓ Período salvo e disponível para análise';
+    setTimeout(()=>{ if(btn) btn.innerHTML=orig; },3500);
+  }
 }
 
 /* =========================================================================
